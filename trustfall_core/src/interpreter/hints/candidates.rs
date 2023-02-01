@@ -1,14 +1,16 @@
+use std::fmt::Debug;
+
 use crate::ir::FieldValue;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CandidateValue<'a> {
-    Impossible,                    // statically determined that no values fit
-    Single(&'a FieldValue),        // there's only one value that fits
-    Multiple(Vec<&'a FieldValue>), // there are multiple values that fit
+pub enum CandidateValue<T> {
+    Impossible,       // statically determined that no values fit
+    Single(T),        // there's only one value that fits
+    Multiple(Vec<T>), // there are multiple values that fit
 }
 
-impl<'a> CandidateValue<'a> {
-    pub(super) fn merge(&mut self, other: &CandidateValue<'a>) {
+impl<T: Debug + Clone + PartialEq + Eq> CandidateValue<T> {
+    pub(super) fn merge(&mut self, other: CandidateValue<T>) {
         match self {
             Self::Impossible => {} // still impossible
             Self::Single(val) => {
@@ -17,7 +19,7 @@ impl<'a> CandidateValue<'a> {
                 match other {
                     Self::Impossible => *self = CandidateValue::Impossible,
                     Self::Single(other) => {
-                        if val != other {
+                        if val != &other {
                             *self = CandidateValue::Impossible;
                         }
                     }
@@ -35,7 +37,7 @@ impl<'a> CandidateValue<'a> {
                         // The other side can only be a single value.
                         // The result is either only a single value or impossible
                         // depending on whether there's overlap.
-                        if multiple.contains(other) {
+                        if multiple.contains(&other) {
                             *self = Self::Single(other);
                         } else {
                             *self = Self::Impossible;
@@ -47,7 +49,8 @@ impl<'a> CandidateValue<'a> {
                         if possibilities == 0 {
                             *self = Self::Impossible;
                         } else if possibilities == 1 {
-                            *self = Self::Single(multiple[0]);
+                            let first = multiple.swap_remove(0);
+                            *self = Self::Single(first);
                         } // otherwise it stays Multiple and we already mutated the Vec it holds
                     }
                 }
@@ -192,7 +195,7 @@ mod tests {
 
         for (original, merged, expected) in test_cases {
             let mut base = original.clone();
-            base.merge(&merged);
+            base.merge(merged.clone());
             assert_eq!(
                 expected, base,
                 "{original:?} + {merged:?} = {base:?} != {expected:?}"
