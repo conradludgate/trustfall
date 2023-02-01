@@ -84,6 +84,23 @@ pub struct IRQuery {
     pub variables: BTreeMap<Arc<str>, Type>,
 }
 
+impl IRQuery {
+    fn recursively_find_component_for_vertex<'a>(component: &'a Arc<IRQueryComponent>, vid: &Vid) -> Option<&'a Arc<IRQueryComponent>> {
+        if component.vertices.contains_key(vid) {
+            Some(component)
+        } else {
+            component.folds.iter().filter_map(|(_, fold)| {
+                let component = &fold.component;
+                IRQuery::recursively_find_component_for_vertex(component, vid)
+            }).next()
+        }
+    }
+
+    pub(crate) fn find_component_for_vertex(&self, vid: Vid) -> Option<&Arc<IRQueryComponent>> {
+        IRQuery::recursively_find_component_for_vertex(&self.root_component, &vid)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IREdge {
     pub eid: Eid,

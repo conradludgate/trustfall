@@ -20,6 +20,10 @@ pub enum FieldValue {
     List(Vec<FieldValue>),
 }
 
+impl FieldValue {
+    pub const NULL: Self = FieldValue::Null;
+}
+
 /// Same as FieldValue, but serialized as an untagged enum,
 /// which may be more suitable e.g. when serializing to JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,12 +131,9 @@ impl FieldValue {
         }
     }
 
-    pub fn as_vec<'a, T>(&'a self, inner: impl Fn(&'a FieldValue) -> Option<T>) -> Option<Vec<T>> {
+    pub fn as_vec(&self) -> Option<&Vec<FieldValue>> {
         match self {
-            FieldValue::List(l) => {
-                let maybe_vec: Option<Vec<T>> = l.iter().map(inner).collect();
-                maybe_vec
-            }
+            FieldValue::List(l) => Some(l),
             _ => None,
         }
     }
