@@ -4,13 +4,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::{fmt::Debug, marker::PhantomData};
 
-use crate::ir::{Argument, IRVertex, Operation, ContextField};
+use crate::ir::{Argument, ContextField, IRVertex, Operation};
 use crate::{
     interpreter::basic_adapter::{ContextIterator, ContextOutcomeIterator},
     ir::{Eid, FieldValue, IRQueryComponent, Vid},
 };
 
-use super::{InterpretedQuery, Adapter};
+use super::execution::compute_context_field_with_separate_value;
+use super::{Adapter, InterpretedQuery};
 
 mod candidates;
 pub use candidates::{CandidateValue, RangeBoundKind, RangeEndpoint};
@@ -229,16 +230,28 @@ impl VertexInfo for NeighboringQueryInfo {
 
 #[non_exhaustive]
 pub struct DynamicallyResolved<ValueT> {
+    query: InterpretedQuery,
+    vid: Vid,
     context_field: ContextField,
     _marker: PhantomData<ValueT>,
 }
 
-impl<ValueT> DynamicallyResolved<ValueT> {
-    pub fn resolve<'vertex, VertexT: Debug + Clone + 'vertex, AdapterT: Adapter<'vertex, DataToken=VertexT>>(
+impl DynamicallyResolved<FieldValue> {
+    pub fn resolve<
+        'vertex,
+        VertexT: Debug + Clone + 'vertex,
+        AdapterT: Adapter<'vertex, DataToken = VertexT>,
+    >(
         self,
         adapter: &mut AdapterT,
         contexts: ContextIterator<'vertex, VertexT>,
-    ) -> ContextOutcomeIterator<'vertex, VertexT, ValueT> {
-        todo!()
+    ) -> ContextOutcomeIterator<'vertex, VertexT, FieldValue> {
+        compute_context_field_with_separate_value(
+            adapter,
+            &self.query,
+            &self.query.indexed_query.vids[&self.vid],
+            &self.context_field,
+            contexts,
+        )
     }
 }

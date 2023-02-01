@@ -18,10 +18,10 @@ pub mod basic_adapter;
 pub mod error;
 pub mod execution;
 mod filtering;
+pub mod hints;
 pub mod macros;
 pub mod replay;
 pub mod trace;
-pub mod hints;
 
 #[derive(Debug, Clone)]
 pub struct DataContext<DataToken: Clone + Debug> {

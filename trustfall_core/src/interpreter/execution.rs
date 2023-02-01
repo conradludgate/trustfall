@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
+    ops::DerefMut,
     rc::Rc,
     sync::Arc,
 };
@@ -901,13 +902,39 @@ fn apply_filter<
     }
 }
 
-fn compute_context_field<'query, DataToken: Clone + Debug + 'query>(
-    adapter: &RefCell<impl Adapter<'query, DataToken = DataToken>>,
+fn compute_context_field<'query, AdapterT: Adapter<'query>>(
+    adapter: &RefCell<AdapterT>,
     query: &InterpretedQuery,
     component: &IRQueryComponent,
     context_field: &ContextField,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
+    iterator: Box<dyn Iterator<Item = DataContext<AdapterT::DataToken>> + 'query>,
+) -> Box<dyn Iterator<Item = DataContext<AdapterT::DataToken>> + 'query> {
+    let mut adapter_ref = adapter.borrow_mut();
+
+    let output_iterator = compute_context_field_with_separate_value(
+        adapter_ref.deref_mut(),
+        query,
+        component,
+        context_field,
+        iterator,
+    )
+    .map(|(mut context, value)| {
+        context.values.push(value);
+        context
+    });
+
+    drop(adapter_ref);
+
+    Box::new(output_iterator)
+}
+
+pub(super) fn compute_context_field_with_separate_value<'query, AdapterT: Adapter<'query>>(
+    adapter: &mut AdapterT,
+    query: &InterpretedQuery,
+    component: &IRQueryComponent,
+    context_field: &ContextField,
+    iterator: Box<dyn Iterator<Item = DataContext<AdapterT::DataToken>> + 'query>,
+) -> Box<dyn Iterator<Item = (DataContext<AdapterT::DataToken>, FieldValue)> + 'query> {
     let vertex_id = context_field.vertex_id;
 
     if let Some(vertex) = component.vertices.get(&vertex_id) {
@@ -919,33 +946,29 @@ fn compute_context_field<'query, DataToken: Clone + Debug + 'query>(
         });
 
         let current_type_name = &vertex.type_name;
-        let mut adapter_ref = adapter.borrow_mut();
-        let context_and_value_iterator = adapter_ref.project_property(
-            Box::new(moved_iterator),
-            current_type_name.clone(),
-            context_field.field_name.clone(),
-            query.clone(),
-            vertex_id,
-        );
-        drop(adapter_ref);
+        let context_and_value_iterator = adapter
+            .project_property(
+                Box::new(moved_iterator),
+                current_type_name.clone(),
+                context_field.field_name.clone(),
+                query.clone(),
+                vertex_id,
+            )
+            .map(|(mut context, value)| {
+                // Make sure that the context has the same "current" token
+                // as before evaluating the context field.
+                let old_current_token = context.suspended_tokens.pop().unwrap();
+                (context.move_to_token(old_current_token), value)
+            });
 
-        Box::new(context_and_value_iterator.map(|(mut context, value)| {
-            context.values.push(value);
-
-            // Make sure that the context has the same "current" token
-            // as before evaluating the context field.
-            let old_current_token = context.suspended_tokens.pop().unwrap();
-            context.move_to_token(old_current_token)
-        }))
+        Box::new(context_and_value_iterator)
     } else {
         // This context field represents an imported tag value from an outer component.
         // Grab its value from the context itself.
         let field_ref = FieldRef::ContextField(context_field.clone());
-        Box::new(iterator.map(move |mut context| {
+        Box::new(iterator.map(move |context| {
             let value = context.imported_tags[&field_ref].clone();
-            context.values.push(value);
-
-            context
+            (context, value)
         }))
     }
 }

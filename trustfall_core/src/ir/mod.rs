@@ -85,14 +85,21 @@ pub struct IRQuery {
 }
 
 impl IRQuery {
-    fn recursively_find_component_for_vertex<'a>(component: &'a Arc<IRQueryComponent>, vid: &Vid) -> Option<&'a Arc<IRQueryComponent>> {
+    fn recursively_find_component_for_vertex<'a>(
+        component: &'a Arc<IRQueryComponent>,
+        vid: &Vid,
+    ) -> Option<&'a Arc<IRQueryComponent>> {
         if component.vertices.contains_key(vid) {
             Some(component)
         } else {
-            component.folds.iter().filter_map(|(_, fold)| {
-                let component = &fold.component;
-                IRQuery::recursively_find_component_for_vertex(component, vid)
-            }).next()
+            component
+                .folds
+                .iter()
+                .filter_map(|(_, fold)| {
+                    let component = &fold.component;
+                    IRQuery::recursively_find_component_for_vertex(component, vid)
+                })
+                .next()
         }
     }
 
