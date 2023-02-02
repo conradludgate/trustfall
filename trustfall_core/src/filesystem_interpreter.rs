@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::interpreter::{Adapter, DataContext, InterpretedQuery};
-use crate::ir::{EdgeParameters, Eid, FieldValue, Vid};
+use crate::interpreter::hints::QueryInfo;
+use crate::interpreter::{Adapter, DataContext};
+use crate::ir::{EdgeParameters, FieldValue};
 use std::fs::{self, ReadDir};
 use std::iter;
 use std::path::{Path, PathBuf};
@@ -260,8 +261,7 @@ impl Adapter<'static> for FilesystemInterpreter {
         &mut self,
         edge: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = FilesystemToken>> {
         assert!(edge.as_ref() == "OriginDirectory");
         assert!(parameters.is_none());
@@ -277,8 +277,7 @@ impl Adapter<'static> for FilesystemInterpreter {
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = ContextAndValue>> {
         match current_type_name.as_ref() {
             "Directory" => match field_name.as_ref() {
@@ -342,9 +341,7 @@ impl Adapter<'static> for FilesystemInterpreter {
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
-        edge_hint: Eid,
+        query_info: &QueryInfo,
     ) -> Box<
         dyn Iterator<
             Item = (
@@ -379,8 +376,7 @@ impl Adapter<'static> for FilesystemInterpreter {
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, bool)>> {
         todo!()
     }

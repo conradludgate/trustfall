@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::ir::{Argument, ContextField, FieldRef, IRVertex, Operation};
+use crate::ir::{Argument, ContextField, FieldRef, IRQuery, IRVertex, Operation};
 use crate::{
     interpreter::basic_adapter::{ContextIterator, ContextOutcomeIterator},
     ir::{Eid, FieldValue, IRQueryComponent, Vid},
@@ -108,23 +108,72 @@ pub trait VertexInfo {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct QueryInfo {
-    query: InterpretedQuery,
-    current_vertex: Vid,
+    pub(crate) query: InterpretedQuery,
+    pub(crate) current_vertex: Vid,
+    pub(crate) crossing_eid: Option<Eid>,
 }
 
 impl QueryInfo {
+    #[inline]
+    pub(crate) fn new(
+        query: InterpretedQuery,
+        current_vertex: Vid,
+        crossing_eid: Option<Eid>,
+    ) -> Self {
+        Self {
+            query,
+            current_vertex,
+            crossing_eid,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn ir_query(&self) -> &IRQuery {
+        &self.query.indexed_query.ir_query
+    }
+
+    #[inline]
+    pub(crate) fn arguments(&self) -> &Arc<BTreeMap<Arc<str>, FieldValue>> {
+        &self.query.arguments
+    }
+
+    #[inline]
+    pub fn at_vid(&self) -> Vid {
+        self.current_vertex
+    }
+
+    #[inline]
+    pub fn crossing_eid(&self) -> &Option<Eid> {
+        &self.crossing_eid
+    }
+
+    #[inline]
     pub fn here(&self) -> LocalQueryInfo {
         LocalQueryInfo {
-            query: self.query.clone(),
+            query: self.clone(),
             current_vertex: self.current_vertex,
         }
+    }
+
+    #[inline]
+    pub fn destination(&self) -> Option<LocalQueryInfo> {
+        self.crossing_eid.map(|eid| {
+            let current_vertex = match &self.query.indexed_query.eids[&eid] {
+                crate::ir::indexed::EdgeKind::Regular(regular) => regular.to_vid,
+                crate::ir::indexed::EdgeKind::Fold(fold) => fold.to_vid,
+            };
+            LocalQueryInfo {
+                query: self.clone(),
+                current_vertex,
+            }
+        })
     }
 }
 
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct LocalQueryInfo {
-    query: InterpretedQuery,
+    query: QueryInfo,
     current_vertex: Vid,
 }
 
@@ -136,12 +185,12 @@ impl VertexInfo for LocalQueryInfo {
 
     #[inline]
     fn current_component(&self) -> &IRQueryComponent {
-        &self.query.indexed_query.vids[&self.current_vertex]
+        &self.query.query.indexed_query.vids[&self.current_vertex]
     }
 
     #[inline]
     fn query_arguments(&self) -> &BTreeMap<Arc<str>, FieldValue> {
-        &self.query.arguments
+        self.query.arguments()
     }
 
     fn dynamic_field_value(&self, field_name: &str) -> Option<DynamicallyResolvedValue> {
@@ -180,8 +229,12 @@ impl VertexInfo for LocalQueryInfo {
     fn required_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
         // TODO: What happens if the same edge exists more than once in a given scope?
         let component = self.current_component();
+        let current_vertex = self.current_vertex();
         let first_matching_edge = component.edges.values().find(|edge| {
-            !edge.optional && edge.recursive.is_none() && edge.edge_name.as_ref() == edge_name
+            edge.from_vid == current_vertex.vid
+                && !edge.optional
+                && edge.recursive.is_none()
+                && edge.edge_name.as_ref() == edge_name
         });
         if let Some(matching_edge) = first_matching_edge {
             let neighboring_info = NeighboringQueryInfo {
@@ -222,7 +275,7 @@ impl EdgeInfo {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct NeighboringQueryInfo {
-    query: InterpretedQuery,
+    query: QueryInfo,
     starting_vertex: Vid,
     neighbor_vertex: Vid,
     neighbor_path: Vec<Eid>,
@@ -236,12 +289,12 @@ impl VertexInfo for NeighboringQueryInfo {
 
     #[inline]
     fn current_component(&self) -> &IRQueryComponent {
-        &self.query.indexed_query.vids[&self.neighbor_vertex]
+        &self.query.query.indexed_query.vids[&self.neighbor_vertex]
     }
 
     #[inline]
     fn query_arguments(&self) -> &BTreeMap<Arc<str>, FieldValue> {
-        &self.query.arguments
+        self.query.arguments()
     }
 
     fn dynamic_field_value(&self, field_name: &str) -> Option<DynamicallyResolvedValue> {
@@ -305,8 +358,12 @@ impl VertexInfo for NeighboringQueryInfo {
     fn required_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
         // TODO: What happens if the same edge exists more than once in a given scope?
         let component = self.current_component();
+        let current_vertex = self.current_vertex();
         let first_matching_edge = component.edges.values().find(|edge| {
-            !edge.optional && edge.recursive.is_none() && edge.edge_name.as_ref() == edge_name
+            edge.from_vid == current_vertex.vid
+                && !edge.optional
+                && edge.recursive.is_none()
+                && edge.edge_name.as_ref() == edge_name
         });
         if let Some(matching_edge) = first_matching_edge {
             let mut neighbor_path = self.neighbor_path.clone();
@@ -337,7 +394,7 @@ impl VertexInfo for NeighboringQueryInfo {
 
 #[non_exhaustive]
 pub struct DynamicallyResolvedValue {
-    query: InterpretedQuery,
+    query: QueryInfo,
     vid: Vid,
     context_field: ContextField,
     is_multiple: bool,
@@ -349,14 +406,15 @@ impl DynamicallyResolvedValue {
         VertexT: Debug + Clone + 'vertex,
         AdapterT: Adapter<'vertex, DataToken = VertexT>,
     >(
-        self,
+        mut self,
         adapter: &mut AdapterT,
         contexts: ContextIterator<'vertex, VertexT>,
     ) -> ContextOutcomeIterator<'vertex, VertexT, CandidateValue<FieldValue>> {
+        let component = &self.query.query.indexed_query.vids[&self.vid].clone();
         let iterator = compute_context_field_with_separate_value(
             adapter,
-            &self.query,
-            &self.query.indexed_query.vids[&self.vid],
+            &mut self.query,
+            component,
             &self.context_field,
             contexts,
         );

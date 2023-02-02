@@ -1,8 +1,8 @@
 use std::fmt::Debug;
 
-use crate::ir::{EdgeParameters, Eid, FieldValue, Vid};
+use crate::ir::{EdgeParameters, FieldValue};
 
-use super::{Adapter, DataContext, InterpretedQuery};
+use super::{hints::QueryInfo, Adapter, DataContext};
 
 /// An iterator of vertices representing data points we are querying.
 pub type VertexIterator<'vertex, VertexT> = Box<dyn Iterator<Item = VertexT> + 'vertex>;
@@ -168,8 +168,7 @@ where
         &mut self,
         edge: std::sync::Arc<str>,
         parameters: Option<std::sync::Arc<EdgeParameters>>,
-        _query_hint: InterpretedQuery,
-        _vertex_hint: Vid,
+        _query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = Self::DataToken> + 'token> {
         <Self as BasicAdapter>::resolve_starting_vertices(
             self,
@@ -183,8 +182,7 @@ where
         contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: std::sync::Arc<str>,
         field_name: std::sync::Arc<str>,
-        _query_hint: InterpretedQuery,
-        _vertex_hint: Vid,
+        _query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, FieldValue)> + 'token> {
         <Self as BasicAdapter>::resolve_property(
             self,
@@ -200,9 +198,7 @@ where
         current_type_name: std::sync::Arc<str>,
         edge_name: std::sync::Arc<str>,
         parameters: Option<std::sync::Arc<EdgeParameters>>,
-        _query_hint: InterpretedQuery,
-        _vertex_hint: Vid,
-        _edge_hint: Eid,
+        _query_info: &QueryInfo,
     ) -> Box<
         dyn Iterator<
                 Item = (
@@ -225,8 +221,7 @@ where
         contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: std::sync::Arc<str>,
         coerce_to_type_name: std::sync::Arc<str>,
-        _query_hint: InterpretedQuery,
-        _vertex_hint: Vid,
+        _query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, bool)> + 'token> {
         <Self as BasicAdapter>::resolve_coercion(
             self,

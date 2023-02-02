@@ -3,8 +3,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    interpreter::{Adapter, DataContext, InterpretedQuery},
-    ir::{EdgeParameters, Eid, FieldValue, Vid},
+    interpreter::{hints::QueryInfo, Adapter, DataContext},
+    ir::{EdgeParameters, FieldValue},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,8 +21,7 @@ impl Adapter<'static> for NullablesAdapter {
         &mut self,
         edge: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = Self::DataToken>> {
         unimplemented!()
     }
@@ -32,8 +31,7 @@ impl Adapter<'static> for NullablesAdapter {
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, FieldValue)>> {
         unimplemented!()
     }
@@ -45,9 +43,7 @@ impl Adapter<'static> for NullablesAdapter {
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
-        edge_hint: Eid,
+        query_info: &QueryInfo,
     ) -> Box<
         dyn Iterator<
             Item = (
@@ -64,8 +60,7 @@ impl Adapter<'static> for NullablesAdapter {
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, bool)>> {
         unimplemented!()
     }

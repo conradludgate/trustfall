@@ -12,7 +12,7 @@ use crate::{
     util::BTreeMapTryInsertExt,
 };
 
-use self::error::QueryArgumentsError;
+use self::{error::QueryArgumentsError, hints::QueryInfo};
 
 pub mod basic_adapter;
 pub mod error;
@@ -355,8 +355,7 @@ pub trait Adapter<'token> {
         &mut self,
         edge: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = Self::DataToken> + 'token>;
 
     #[allow(clippy::type_complexity)]
@@ -365,8 +364,7 @@ pub trait Adapter<'token> {
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, FieldValue)> + 'token>;
 
     #[allow(clippy::type_complexity)]
@@ -377,9 +375,7 @@ pub trait Adapter<'token> {
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
-        edge_hint: Eid,
+        query_info: &QueryInfo,
     ) -> Box<
         dyn Iterator<
                 Item = (
@@ -394,7 +390,6 @@ pub trait Adapter<'token> {
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, bool)> + 'token>;
 }

@@ -11,7 +11,7 @@ use crate::{
     util::BTreeMapTryInsertExt,
 };
 
-use super::InterpretedQuery;
+use super::hints::QueryInfo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Opid(pub NonZeroUsize); // operation ID
@@ -240,19 +240,18 @@ where
         &mut self,
         edge_name: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = Self::DataToken> + 'token> {
         let mut trace = self.tracer.borrow_mut();
         let call_opid = trace.record(
-            TraceOpContent::Call(FunctionCall::GetStartingTokens(vertex_hint)),
+            TraceOpContent::Call(FunctionCall::GetStartingTokens(query_info.at_vid())),
             None,
         );
         drop(trace);
 
-        let inner_iter =
-            self.inner
-                .get_starting_tokens(edge_name, parameters, query_hint, vertex_hint);
+        let inner_iter = self
+            .inner
+            .get_starting_tokens(edge_name, parameters, query_info);
         let tracer_ref_1 = self.tracer.clone();
         let tracer_ref_2 = self.tracer.clone();
         Box::new(
@@ -277,13 +276,12 @@ where
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, FieldValue)> + 'token> {
         let mut trace = self.tracer.borrow_mut();
         let call_opid = trace.record(
             TraceOpContent::Call(FunctionCall::ProjectProperty(
-                vertex_hint,
+                query_info.at_vid(),
                 current_type_name.clone(),
                 field_name.clone(),
             )),
@@ -318,8 +316,7 @@ where
             wrapped_contexts,
             current_type_name,
             field_name,
-            query_hint,
-            vertex_hint,
+            query_info,
         );
 
         let tracer_ref_4 = self.tracer.clone();
@@ -351,9 +348,7 @@ where
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
-        edge_hint: Eid,
+        query_info: &QueryInfo,
     ) -> Box<
         dyn Iterator<
                 Item = (
@@ -365,9 +360,11 @@ where
         let mut trace = self.tracer.borrow_mut();
         let call_opid = trace.record(
             TraceOpContent::Call(FunctionCall::ProjectNeighbors(
-                vertex_hint,
+                query_info.at_vid(),
                 current_type_name.clone(),
-                edge_hint,
+                query_info
+                    .crossing_eid()
+                    .expect("project_neighbors called but not crossing any edge"),
             )),
             None,
         );
@@ -401,9 +398,7 @@ where
             current_type_name,
             edge_name,
             parameters,
-            query_hint,
-            vertex_hint,
-            edge_hint,
+            query_info,
         );
 
         let tracer_ref_4 = self.tracer.clone();
@@ -454,13 +449,12 @@ where
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, bool)> + 'token> {
         let mut trace = self.tracer.borrow_mut();
         let call_opid = trace.record(
             TraceOpContent::Call(FunctionCall::CanCoerceToType(
-                vertex_hint,
+                query_info.at_vid(),
                 current_type_name.clone(),
                 coerce_to_type_name.clone(),
             )),
@@ -495,8 +489,7 @@ where
             wrapped_contexts,
             current_type_name,
             coerce_to_type_name,
-            query_hint,
-            vertex_hint,
+            query_info,
         );
 
         let tracer_ref_4 = self.tracer.clone();

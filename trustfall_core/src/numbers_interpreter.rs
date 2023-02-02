@@ -4,8 +4,8 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    interpreter::{Adapter, DataContext, InterpretedQuery},
-    ir::{EdgeParameters, Eid, FieldValue, Vid},
+    interpreter::{hints::QueryInfo, Adapter, DataContext},
+    ir::{EdgeParameters, FieldValue},
     project_property,
 };
 
@@ -159,8 +159,7 @@ impl Adapter<'static> for NumbersAdapter {
         &mut self,
         edge: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = Self::DataToken>> {
         let mut primes = btreeset![2, 3];
         match edge.as_ref() {
@@ -196,8 +195,7 @@ impl Adapter<'static> for NumbersAdapter {
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, FieldValue)>> {
         project_property! {
             data_contexts, current_type_name, field_name, [
@@ -235,9 +233,7 @@ impl Adapter<'static> for NumbersAdapter {
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
-        edge_hint: Eid,
+        query_info: &QueryInfo,
     ) -> Box<
         dyn Iterator<
             Item = (
@@ -385,8 +381,7 @@ impl Adapter<'static> for NumbersAdapter {
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,
-        query_hint: InterpretedQuery,
-        vertex_hint: Vid,
+        query_info: &QueryInfo,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, bool)>> {
         match (current_type_name.as_ref(), coerce_to_type_name.as_ref()) {
             ("Number", "Prime") => Box::new(data_contexts.map(move |context| {
