@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::ir::{Argument, ContextField, FieldRef, IRQuery, IRVertex, Operation};
+use crate::ir::{
+    Argument, ContextField, FieldRef, IREdge, IRFold, IRQuery, IRVertex, Operation, Recursive,
+};
 use crate::{
     interpreter::basic_adapter::{ContextIterator, ContextOutcomeIterator},
     ir::{Eid, FieldValue, IRQueryComponent, Vid},
@@ -102,7 +104,7 @@ pub trait VertexInfo {
     // optional, recursed, or folded edge;
     // recursed because recursion always starts at depth 0
     // TODO: What happens if the same edge exists more than once in a given scope?
-    // fn optional_edge(&self, edge_name: &str) -> Option<EdgeInfo>;
+    fn optional_edge(&self, edge_name: &str) -> Option<EdgeInfo>;
 }
 
 #[non_exhaustive]
@@ -177,6 +179,40 @@ pub struct LocalQueryInfo {
     current_vertex: Vid,
 }
 
+impl LocalQueryInfo {
+    fn make_non_folded_edge_info(&self, edge: &IREdge) -> EdgeInfo {
+        let neighboring_info = NeighboringQueryInfo {
+            query: self.query.clone(),
+            starting_vertex: self.current_vertex,
+            neighbor_vertex: edge.to_vid,
+            neighbor_path: vec![edge.eid],
+        };
+        EdgeInfo {
+            eid: edge.eid,
+            optional: edge.optional,
+            recursive: edge.recursive.clone(),
+            folded: false,
+            destination: neighboring_info,
+        }
+    }
+
+    fn make_folded_edge_info(&self, fold: &IRFold) -> EdgeInfo {
+        let neighboring_info = NeighboringQueryInfo {
+            query: self.query.clone(),
+            starting_vertex: self.current_vertex,
+            neighbor_vertex: fold.to_vid,
+            neighbor_path: vec![fold.eid],
+        };
+        EdgeInfo {
+            eid: fold.eid,
+            optional: true,
+            recursive: None,
+            folded: true,
+            destination: neighboring_info,
+        }
+    }
+}
+
 impl VertexInfo for LocalQueryInfo {
     #[inline]
     fn current_vertex(&self) -> &IRVertex {
@@ -202,6 +238,7 @@ impl VertexInfo for LocalQueryInfo {
                     return Some(DynamicallyResolvedValue {
                         query: self.query.clone(),
                         vid: vertex.vid,
+                        resolve_on_component: self.query.query.indexed_query.vids[&vertex.vid].clone(),
                         context_field: context_field.clone(),
                         is_multiple: false,
                     });
@@ -210,6 +247,7 @@ impl VertexInfo for LocalQueryInfo {
                     return Some(DynamicallyResolvedValue {
                         query: self.query.clone(),
                         vid: vertex.vid,
+                        resolve_on_component: self.query.query.indexed_query.vids[&vertex.vid].clone(),
                         context_field: context_field.clone(),
                         is_multiple: true,
                     });
@@ -236,23 +274,27 @@ impl VertexInfo for LocalQueryInfo {
                 && edge.recursive.is_none()
                 && edge.edge_name.as_ref() == edge_name
         });
-        if let Some(matching_edge) = first_matching_edge {
-            let neighboring_info = NeighboringQueryInfo {
-                query: self.query.clone(),
-                starting_vertex: self.current_vertex,
-                neighbor_vertex: matching_edge.to_vid,
-                neighbor_path: vec![matching_edge.eid],
-            };
-            Some(EdgeInfo {
-                eid: matching_edge.eid,
-                optional: false,
-                recursive: None,
-                folded: false,
-                destination: neighboring_info,
+        first_matching_edge.map(|edge| self.make_non_folded_edge_info(edge.as_ref()))
+    }
+
+    fn optional_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
+        // TODO: What happens if the same edge exists more than once in a given scope?
+        let component = self.current_component();
+        let current_vertex = self.current_vertex();
+        let first_matching_edge = component.edges.values().find(|edge| {
+            edge.from_vid == current_vertex.vid && edge.edge_name.as_ref() == edge_name
+        });
+        first_matching_edge
+            .map(|edge| self.make_non_folded_edge_info(edge.as_ref()))
+            .or_else(|| {
+                component
+                    .folds
+                    .values()
+                    .find(|fold| {
+                        fold.from_vid == current_vertex.vid && fold.edge_name.as_ref() == edge_name
+                    })
+                    .map(|fold| self.make_folded_edge_info(fold.as_ref()))
             })
-        } else {
-            None
-        }
     }
 }
 
@@ -261,7 +303,7 @@ impl VertexInfo for LocalQueryInfo {
 pub struct EdgeInfo {
     eid: Eid,
     optional: bool,
-    recursive: Option<usize>, // TODO: perhaps a better inner type, to represent "no-limit" too?
+    recursive: Option<Recursive>,
     folded: bool,
     destination: NeighboringQueryInfo,
 }
@@ -279,6 +321,44 @@ pub struct NeighboringQueryInfo {
     starting_vertex: Vid,
     neighbor_vertex: Vid,
     neighbor_path: Vec<Eid>,
+}
+
+impl NeighboringQueryInfo {
+    fn make_non_folded_edge_info(&self, edge: &IREdge) -> EdgeInfo {
+        let mut neighbor_path = self.neighbor_path.clone();
+        neighbor_path.push(edge.eid);
+        let neighboring_info = NeighboringQueryInfo {
+            query: self.query.clone(),
+            starting_vertex: self.starting_vertex,
+            neighbor_vertex: edge.to_vid,
+            neighbor_path,
+        };
+        EdgeInfo {
+            eid: edge.eid,
+            optional: edge.optional,
+            recursive: edge.recursive.clone(),
+            folded: false,
+            destination: neighboring_info,
+        }
+    }
+
+    fn make_folded_edge_info(&self, fold: &IRFold) -> EdgeInfo {
+        let mut neighbor_path = self.neighbor_path.clone();
+        neighbor_path.push(fold.eid);
+        let neighboring_info = NeighboringQueryInfo {
+            query: self.query.clone(),
+            starting_vertex: self.starting_vertex,
+            neighbor_vertex: fold.to_vid,
+            neighbor_path,
+        };
+        EdgeInfo {
+            eid: fold.eid,
+            optional: true,
+            recursive: None,
+            folded: true,
+            destination: neighboring_info,
+        }
+    }
 }
 
 impl VertexInfo for NeighboringQueryInfo {
@@ -330,6 +410,7 @@ impl VertexInfo for NeighboringQueryInfo {
                             query: self.query.clone(),
                             vid: vertex.vid,
                             context_field: context_field.clone(),
+                            resolve_on_component: self.query.query.indexed_query.vids[&self.starting_vertex].clone(),
                             is_multiple: false,
                         });
                     }
@@ -340,6 +421,7 @@ impl VertexInfo for NeighboringQueryInfo {
                             query: self.query.clone(),
                             vid: vertex.vid,
                             context_field: context_field.clone(),
+                            resolve_on_component: self.query.query.indexed_query.vids[&self.starting_vertex].clone(),
                             is_multiple: true,
                         });
                     }
@@ -365,37 +447,35 @@ impl VertexInfo for NeighboringQueryInfo {
                 && edge.recursive.is_none()
                 && edge.edge_name.as_ref() == edge_name
         });
-        if let Some(matching_edge) = first_matching_edge {
-            let mut neighbor_path = self.neighbor_path.clone();
-            neighbor_path.push(matching_edge.eid);
-            let neighboring_info = NeighboringQueryInfo {
-                query: self.query.clone(),
-                starting_vertex: self.starting_vertex,
-                neighbor_vertex: matching_edge.to_vid,
-                neighbor_path,
-            };
-            Some(EdgeInfo {
-                eid: matching_edge.eid,
-                optional: false,
-                recursive: None,
-                folded: false,
-                destination: neighboring_info,
-            })
-        } else {
-            None
-        }
+        first_matching_edge.map(|edge| self.make_non_folded_edge_info(edge.as_ref()))
     }
 
-    // fn optional_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
-    //     // similar concerns as above in `required_edge()`
-    //     todo!()
-    // }
+    fn optional_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
+        // TODO: What happens if the same edge exists more than once in a given scope?
+        let component = self.current_component();
+        let current_vertex = self.current_vertex();
+        let first_matching_edge = component.edges.values().find(|edge| {
+            edge.from_vid == current_vertex.vid && edge.edge_name.as_ref() == edge_name
+        });
+        first_matching_edge
+            .map(|edge| self.make_non_folded_edge_info(edge.as_ref()))
+            .or_else(|| {
+                component
+                    .folds
+                    .values()
+                    .find(|fold| {
+                        fold.from_vid == current_vertex.vid && fold.edge_name.as_ref() == edge_name
+                    })
+                    .map(|fold| self.make_folded_edge_info(fold.as_ref()))
+            })
+    }
 }
 
 #[non_exhaustive]
 pub struct DynamicallyResolvedValue {
     query: QueryInfo,
     vid: Vid,
+    resolve_on_component: Arc<IRQueryComponent>,
     context_field: ContextField,
     is_multiple: bool,
 }
@@ -410,11 +490,11 @@ impl DynamicallyResolvedValue {
         adapter: &mut AdapterT,
         contexts: ContextIterator<'vertex, VertexT>,
     ) -> ContextOutcomeIterator<'vertex, VertexT, CandidateValue<FieldValue>> {
-        let component = &self.query.query.indexed_query.vids[&self.vid].clone();
+        // let component = &self.query.query.indexed_query.vids[&self.vid].clone();
         let iterator = compute_context_field_with_separate_value(
             adapter,
             &mut self.query,
-            component,
+            &self.resolve_on_component,
             &self.context_field,
             contexts,
         );
