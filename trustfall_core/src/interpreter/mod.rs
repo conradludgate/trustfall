@@ -26,7 +26,7 @@ pub mod trace;
 #[derive(Debug, Clone)]
 pub struct DataContext<DataToken: Clone + Debug> {
     pub current_token: Option<DataToken>,
-    tokens: BTreeMap<Vid, Option<DataToken>>,
+    pub(crate) tokens: BTreeMap<Vid, Option<DataToken>>,
     values: Vec<FieldValue>,
     suspended_tokens: Vec<Option<DataToken>>,
     folded_contexts: BTreeMap<Eid, Vec<DataContext<DataToken>>>,

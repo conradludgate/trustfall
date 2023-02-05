@@ -7,6 +7,8 @@ pub enum CandidateValue<T> {
     Impossible,       // statically determined that no values fit
     Single(T),        // there's only one value that fits
     Multiple(Vec<T>), // there are multiple values that fit
+    All,              // all values are possible for this specific entry
+                      // (e.g. used for tag-from-non-existent-optional cases)
 }
 
 impl<T: Debug + Clone + PartialEq + Eq> CandidateValue<T> {
@@ -28,6 +30,7 @@ impl<T: Debug + Clone + PartialEq + Eq> CandidateValue<T> {
                             *self = CandidateValue::Impossible;
                         }
                     }
+                    Self::All => {} // self is unchanged.
                 }
             }
             Self::Multiple(multiple) => {
@@ -53,7 +56,12 @@ impl<T: Debug + Clone + PartialEq + Eq> CandidateValue<T> {
                             *self = Self::Single(first);
                         } // otherwise it stays Multiple and we already mutated the Vec it holds
                     }
+                    Self::All => {} // self is unchanged.
                 }
+            }
+            Self::All => {
+                // Whatever the other candidate was. It can't be any wider than Self::All.
+                *self = other;
             }
         }
     }
@@ -191,6 +199,15 @@ mod tests {
                 Multiple(vec![&three, &two]),
                 Multiple(vec![&two, &three]),
             ),
+            //
+            // Merging Candidate::All from either position produces whatever the other value was.
+            (All, Impossible, Impossible),
+            (Impossible, All, Impossible),
+            (All, Single(&one), Single(&one)),
+            (Single(&one), All, Single(&one)),
+            (All, Multiple(vec![&one, &two]), Multiple(vec![&one, &two])),
+            (Multiple(vec![&one, &two]), All, Multiple(vec![&one, &two])),
+            (All, All, All),
         ];
 
         for (original, merged, expected) in test_cases {

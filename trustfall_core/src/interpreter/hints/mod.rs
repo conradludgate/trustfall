@@ -99,12 +99,12 @@ pub trait VertexInfo {
 
     // non-optional, non-recursed, non-folded edge
     // TODO: What happens if the same edge exists more than once in a given scope?
-    fn required_edge(&self, edge_name: &str) -> Option<EdgeInfo>;
+    fn first_required_edge(&self, edge_name: &str) -> Option<EdgeInfo>;
 
     // optional, recursed, or folded edge;
     // recursed because recursion always starts at depth 0
     // TODO: What happens if the same edge exists more than once in a given scope?
-    fn optional_edge(&self, edge_name: &str) -> Option<EdgeInfo>;
+    fn first_edge(&self, edge_name: &str) -> Option<EdgeInfo>;
 }
 
 #[non_exhaustive]
@@ -238,7 +238,8 @@ impl VertexInfo for LocalQueryInfo {
                     return Some(DynamicallyResolvedValue {
                         query: self.query.clone(),
                         vid: vertex.vid,
-                        resolve_on_component: self.query.query.indexed_query.vids[&vertex.vid].clone(),
+                        resolve_on_component: self.query.query.indexed_query.vids[&vertex.vid]
+                            .clone(),
                         context_field: context_field.clone(),
                         is_multiple: false,
                     });
@@ -247,7 +248,8 @@ impl VertexInfo for LocalQueryInfo {
                     return Some(DynamicallyResolvedValue {
                         query: self.query.clone(),
                         vid: vertex.vid,
-                        resolve_on_component: self.query.query.indexed_query.vids[&vertex.vid].clone(),
+                        resolve_on_component: self.query.query.indexed_query.vids[&vertex.vid]
+                            .clone(),
                         context_field: context_field.clone(),
                         is_multiple: true,
                     });
@@ -264,7 +266,7 @@ impl VertexInfo for LocalQueryInfo {
     // }
 
     // non-optional, non-recursed, non-folded edge
-    fn required_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
+    fn first_required_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
         // TODO: What happens if the same edge exists more than once in a given scope?
         let component = self.current_component();
         let current_vertex = self.current_vertex();
@@ -277,7 +279,7 @@ impl VertexInfo for LocalQueryInfo {
         first_matching_edge.map(|edge| self.make_non_folded_edge_info(edge.as_ref()))
     }
 
-    fn optional_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
+    fn first_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
         // TODO: What happens if the same edge exists more than once in a given scope?
         let component = self.current_component();
         let current_vertex = self.current_vertex();
@@ -410,7 +412,9 @@ impl VertexInfo for NeighboringQueryInfo {
                             query: self.query.clone(),
                             vid: vertex.vid,
                             context_field: context_field.clone(),
-                            resolve_on_component: self.query.query.indexed_query.vids[&self.starting_vertex].clone(),
+                            resolve_on_component: self.query.query.indexed_query.vids
+                                [&self.starting_vertex]
+                                .clone(),
                             is_multiple: false,
                         });
                     }
@@ -421,7 +425,9 @@ impl VertexInfo for NeighboringQueryInfo {
                             query: self.query.clone(),
                             vid: vertex.vid,
                             context_field: context_field.clone(),
-                            resolve_on_component: self.query.query.indexed_query.vids[&self.starting_vertex].clone(),
+                            resolve_on_component: self.query.query.indexed_query.vids
+                                [&self.starting_vertex]
+                                .clone(),
                             is_multiple: true,
                         });
                     }
@@ -437,7 +443,7 @@ impl VertexInfo for NeighboringQueryInfo {
     //     todo!()
     // }
 
-    fn required_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
+    fn first_required_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
         // TODO: What happens if the same edge exists more than once in a given scope?
         let component = self.current_component();
         let current_vertex = self.current_vertex();
@@ -450,7 +456,7 @@ impl VertexInfo for NeighboringQueryInfo {
         first_matching_edge.map(|edge| self.make_non_folded_edge_info(edge.as_ref()))
     }
 
-    fn optional_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
+    fn first_edge(&self, edge_name: &str) -> Option<EdgeInfo> {
         // TODO: What happens if the same edge exists more than once in a given scope?
         let component = self.current_component();
         let current_vertex = self.current_vertex();
@@ -498,11 +504,30 @@ impl DynamicallyResolvedValue {
             &self.context_field,
             contexts,
         );
+        let context_field_vid = self.context_field.vertex_id;
+        let nullable_context_field = self.context_field.field_type.nullable;
         if self.is_multiple {
             Box::new(iterator.map(move |(ctx, value)| {
                 match value {
                     FieldValue::List(v) => (ctx, CandidateValue::Multiple(v)),
-                    FieldValue::Null => (ctx, CandidateValue::Impossible), // nullable field tagged
+                    FieldValue::Null => {
+                        // Either a nullable field was tagged, or
+                        // the @tag is inside an @optional scope that doesn't exist.
+                        let candidate = if ctx.tokens[&context_field_vid].is_none() {
+                            // @optional scope that didn't exist. Our query rules say that
+                            // any filters using this tag *must* pass.
+                            CandidateValue::All
+                        } else {
+                            // The field must have been nullable.
+                            debug_assert!(
+                                nullable_context_field,
+                                "tagged field {:?} was not nullable but received a null value for it",
+                                self.context_field,
+                            );
+                            CandidateValue::Impossible
+                        };
+                        (ctx, candidate)
+                    }
                     bad_value => {
                         panic!(
                             "\
@@ -513,7 +538,27 @@ tagged field named {} of type {:?} produced an invalid value: {bad_value:?}",
                 }
             }))
         } else {
-            Box::new(iterator.map(|(ctx, value)| (ctx, CandidateValue::Single(value))))
+            Box::new(iterator.map(move |(ctx, value)| match value {
+                null_value @ FieldValue::Null => {
+                    // Either a nullable field was tagged, or
+                    // the @tag is inside an @optional scope that doesn't exist.
+                    let candidate = if ctx.tokens[&context_field_vid].is_none() {
+                        // @optional scope that didn't exist. Our query rules say that
+                        // any filters using this tag *must* pass.
+                        CandidateValue::All
+                    } else {
+                        // The field must have been nullable.
+                        debug_assert!(
+                            nullable_context_field,
+                            "tagged field {:?} was not nullable but received a null value for it",
+                            self.context_field,
+                        );
+                        CandidateValue::Single(null_value)
+                    };
+                    (ctx, candidate)
+                }
+                other_value => (ctx, CandidateValue::Single(other_value)),
+            }))
         }
     }
 }
