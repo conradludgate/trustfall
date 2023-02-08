@@ -7,14 +7,18 @@ use std::{cell::RefCell, fs};
 
 use adapter::DemoAdapter;
 use serde::Deserialize;
+use tracing_subscriber::EnvFilter;
 use trustfall_core::ir::TransparentValue;
 use trustfall_core::{
     frontend::parse, interpreter::execution::interpret_ir, ir::FieldValue, schema::Schema,
 };
 
+use tracing_subscriber::{prelude::*, Registry};
+
 #[macro_use]
 extern crate lazy_static;
 
+mod async_adapter;
 mod actions_parser;
 mod adapter;
 mod pagers;
@@ -101,6 +105,18 @@ fn execute_query(path: &str) {
 }
 
 fn main() {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("trustfall_core=debug,demo_hytradboi=debug,warn"));
+
+    let formatting_layer = tracing_tree::HierarchicalLayer::default()
+        .with_writer(tracing_subscriber::fmt::TestWriter::new())
+        .with_indent_lines(true)
+        .with_ansi(true)
+        .with_targets(true)
+        .with_indent_amount(2);
+
+    let subscriber = Registry::default().with(env_filter).with(formatting_layer);
+    subscriber.init();
+
     let args: Vec<String> = env::args().collect();
     let mut reversed_args: Vec<_> = args.iter().map(|x| x.as_str()).rev().collect();
 
@@ -113,6 +129,7 @@ fn main() {
         Some("query") => match reversed_args.pop() {
             None => panic!("No filename provided"),
             Some(path) => {
+                dbg!(path);
                 assert!(reversed_args.is_empty());
                 execute_query(path)
             }

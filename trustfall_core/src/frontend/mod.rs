@@ -405,16 +405,10 @@ pub(crate) fn make_ir_for_query(schema: &Schema, query: &Query) -> Result<IRQuer
     validate_query_against_schema(schema, query)?;
 
     let mut vid_maker = successors(Some(Vid::new(NonZeroUsize::new(1).unwrap())), |x| {
-        let inner_number = x.0.get();
-        Some(Vid::new(
-            NonZeroUsize::new(inner_number.checked_add(1).unwrap()).unwrap(),
-        ))
+        Some(Vid::new(x.0.checked_add(1).unwrap()))
     });
     let mut eid_maker = successors(Some(Eid::new(NonZeroUsize::new(1).unwrap())), |x| {
-        let inner_number = x.0.get();
-        Some(Eid::new(
-            NonZeroUsize::new(inner_number.checked_add(1).unwrap()).unwrap(),
-        ))
+        Some(Eid::new(x.0.checked_add(1).unwrap()))
     });
 
     let mut errors: Vec<FrontendError> = vec![];

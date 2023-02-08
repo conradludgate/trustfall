@@ -7,6 +7,7 @@ use std::{
 };
 
 use regex::Regex;
+use tracing::instrument;
 
 use crate::{
     interpreter::{
@@ -28,6 +29,7 @@ use crate::{
 use super::{error::QueryArgumentsError, Adapter, DataContext, InterpretedQuery};
 
 #[allow(clippy::type_complexity)]
+#[instrument(skip_all)]
 pub fn interpret_ir<'query, DataToken>(
     adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
     indexed_query: Arc<IndexedQuery>,
@@ -61,6 +63,7 @@ where
     Ok(construct_outputs(adapter.as_ref(), &query, iterator))
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn coerce_if_needed<'query, DataToken>(
     adapter: &RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>,
     query: &InterpretedQuery,
@@ -83,6 +86,7 @@ where
     }
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn perform_coercion<'query, DataToken>(
     adapter: &RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>,
     query: &InterpretedQuery,
@@ -114,6 +118,7 @@ where
     ))
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn compute_component<'query, DataToken>(
     adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
     query: &InterpretedQuery,
@@ -202,6 +207,7 @@ where
     iterator
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn construct_outputs<'query, DataToken: Clone + Debug + 'query>(
     adapter: &RefCell<impl Adapter<'query, DataToken = DataToken>>,
     query: &InterpretedQuery,
@@ -211,20 +217,23 @@ fn construct_outputs<'query, DataToken: Clone + Debug + 'query>(
     let mut output_names: Vec<Arc<str>> = ir_query.root_component.outputs.keys().cloned().collect();
     output_names.sort_unstable(); // to ensure deterministic project_property() ordering
 
-    let mut output_iterator = iterator;
+    let mut iter = output_names.iter();
+    // we should have at least 1, right?
+    let mut output_name = iter.next().unwrap();
 
-    for output_name in output_names.iter() {
-        let context_field = &ir_query.root_component.outputs[output_name];
-        let vertex_id = context_field.vertex_id;
-        let moved_iterator = Box::new(output_iterator.map(move |context| {
+    let mut context_field = &ir_query.root_component.outputs[output_name];
+    let mut vertex_id = context_field.vertex_id;
+    let mut output_iterator: Box<dyn Iterator<Item = DataContext<DataToken>>> =
+        Box::new(iterator.map(move |context| {
             let new_token = context.tokens[&vertex_id].clone();
             context.move_to_token(new_token)
         }));
 
+    loop {
         let current_type_name = &ir_query.root_component.vertices[&vertex_id].type_name;
         let mut adapter_ref = adapter.borrow_mut();
         let field_data_iterator = adapter_ref.project_property(
-            moved_iterator,
+            output_iterator,
             current_type_name.clone(),
             context_field.field_name.clone(),
             query.clone(),
@@ -232,10 +241,25 @@ fn construct_outputs<'query, DataToken: Clone + Debug + 'query>(
         );
         drop(adapter_ref);
 
-        output_iterator = Box::new(field_data_iterator.map(|(mut context, value)| {
-            context.values.push(value);
-            context
-        }));
+        match iter.next() {
+            Some(x) => {
+                output_name = x;
+                context_field = &ir_query.root_component.outputs[output_name];
+                vertex_id = context_field.vertex_id;
+                output_iterator = Box::new(field_data_iterator.map(move |(mut context, value)| {
+                    context.values.push(value);
+                    let new_token = context.tokens[&vertex_id].clone();
+                    context.move_to_token(new_token)
+                }));
+            }
+            None => {
+                output_iterator = Box::new(field_data_iterator.map(|(mut context, value)| {
+                    context.values.push(value);
+                    context
+                }));
+                break;
+            }
+        }
     }
 
     let expected_output_names: BTreeSet<_> = query.indexed_query.outputs.keys().cloned().collect();
@@ -263,6 +287,7 @@ fn construct_outputs<'query, DataToken: Clone + Debug + 'query>(
 /// If this IRFold has a filter on the folded element count, and that filter imposes
 /// a max size that can be statically determined, return that max size so it can
 /// be used for further optimizations. Otherwise, return None.
+#[instrument(skip_all)]
 fn get_max_fold_count_limit(query: &InterpretedQuery, fold: &IRFold) -> Option<usize> {
     let mut result: Option<usize> = None;
 
@@ -304,6 +329,7 @@ fn get_max_fold_count_limit(query: &InterpretedQuery, fold: &IRFold) -> Option<u
     result
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn collect_fold_elements<'query, DataToken: Clone + Debug + 'query>(
     mut iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
     max_fold_count_limit: &Option<usize>,
@@ -343,6 +369,7 @@ fn collect_fold_elements<'query, DataToken: Clone + Debug + 'query>(
 }
 
 #[allow(unused_variables)]
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn compute_fold<'query, DataToken: Clone + Debug + 'query>(
     adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
     query: &InterpretedQuery,
@@ -670,6 +697,7 @@ macro_rules! implement_negated_filter {
     };
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint(), ?filter))]
 fn apply_local_field_filter<'query, DataToken: Clone + Debug + 'query>(
     adapter_ref: &RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>,
     query: &InterpretedQuery,
@@ -698,6 +726,7 @@ fn apply_local_field_filter<'query, DataToken: Clone + Debug + 'query>(
     )
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn apply_fold_specific_filter<'query, DataToken: Clone + Debug + 'query>(
     adapter_ref: &RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>,
     query: &InterpretedQuery,
@@ -720,6 +749,7 @@ fn apply_fold_specific_filter<'query, DataToken: Clone + Debug + 'query>(
     )
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint(), ?filter))]
 fn apply_filter<
     'query,
     DataToken: Clone + Debug + 'query,
@@ -901,6 +931,7 @@ fn apply_filter<
     }
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn compute_context_field<'query, DataToken: Clone + Debug + 'query>(
     adapter: &RefCell<impl Adapter<'query, DataToken = DataToken>>,
     query: &InterpretedQuery,
@@ -950,6 +981,7 @@ fn compute_context_field<'query, DataToken: Clone + Debug + 'query>(
     }
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn compute_fold_specific_field<'query, DataToken: Clone + Debug + 'query>(
     fold_eid: Eid,
     fold_specific_field: &FoldSpecificFieldKind,
@@ -964,6 +996,7 @@ fn compute_fold_specific_field<'query, DataToken: Clone + Debug + 'query>(
     }
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint(), ?local_field))]
 fn compute_local_field<'query, DataToken: Clone + Debug + 'query>(
     adapter: &RefCell<impl Adapter<'query, DataToken = DataToken>>,
     query: &InterpretedQuery,
@@ -1057,6 +1090,7 @@ impl<'query, DataToken: Clone + Debug + 'query> Iterator for EdgeExpander<'query
     }
 }
 
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn expand_edge<'query, DataToken: Clone + Debug + 'query>(
     adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
     query: &InterpretedQuery,
@@ -1104,6 +1138,7 @@ fn expand_edge<'query, DataToken: Clone + Debug + 'query>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn expand_non_recursive_edge<'query, DataToken: Clone + Debug + 'query>(
     adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
     query: &InterpretedQuery,
@@ -1142,6 +1177,7 @@ fn expand_non_recursive_edge<'query, DataToken: Clone + Debug + 'query>(
 /// - coerce the type, if needed
 /// - apply all local filters
 /// - record the token at this Vid in the context
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn perform_entry_into_new_vertex<'query, DataToken: Clone + Debug + 'query>(
     adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
     query: &InterpretedQuery,
@@ -1168,6 +1204,7 @@ fn perform_entry_into_new_vertex<'query, DataToken: Clone + Debug + 'query>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn expand_recursive_edge<'query, DataToken: Clone + Debug + 'query>(
     adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
     query: &InterpretedQuery,
@@ -1252,6 +1289,7 @@ fn expand_recursive_edge<'query, DataToken: Clone + Debug + 'query>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[instrument(skip_all, fields(len = ?iterator.size_hint()))]
 fn perform_one_recursive_edge_expansion<'query, DataToken: Clone + Debug + 'query>(
     adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
     query: &InterpretedQuery,

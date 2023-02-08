@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 
 use itertools::Itertools;
 use octorust::types::ContentFile;
@@ -7,7 +7,7 @@ use yaml_rust::{Yaml, YamlLoader};
 use crate::token::{ActionsImportedStep, ActionsJob, ActionsRunStep, Token};
 
 pub(crate) fn get_jobs_in_workflow_file(
-    content: Rc<ContentFile>,
+    content: Arc<ContentFile>,
 ) -> Box<dyn Iterator<Item = Token>> {
     let file_content =
         String::from_utf8(base64::decode(content.content.replace('\n', "")).unwrap()).unwrap();
@@ -53,7 +53,7 @@ pub(crate) fn get_jobs_in_workflow_file(
 
                     let runs_on = job_content["runs-on"].as_str().map(|x| x.to_string());
 
-                    Some(Token::GitHubActionsJob(Rc::new(ActionsJob::new(
+                    Some(Token::GitHubActionsJob(Arc::new(ActionsJob::new(
                         job_content,
                         name,
                         runs_on,
@@ -63,7 +63,7 @@ pub(crate) fn get_jobs_in_workflow_file(
     )
 }
 
-pub(crate) fn get_steps_in_job(job: Rc<ActionsJob>) -> Box<dyn Iterator<Item = Token>> {
+pub(crate) fn get_steps_in_job(job: Arc<ActionsJob>) -> Box<dyn Iterator<Item = Token>> {
     let steps = job.yaml["steps"].clone();
     if steps.is_badvalue() || !steps.is_array() {
         eprintln!("invalid yaml, no 'steps' array in workflow job yaml: {job:?}",);
@@ -100,7 +100,7 @@ pub(crate) fn get_steps_in_job(job: Rc<ActionsJob>) -> Box<dyn Iterator<Item = T
     }))
 }
 
-pub(crate) fn get_env_for_run_step(step: Rc<ActionsRunStep>) -> Box<dyn Iterator<Item = Token>> {
+pub(crate) fn get_env_for_run_step(step: Arc<ActionsRunStep>) -> Box<dyn Iterator<Item = Token>> {
     let step_hash = match step.yaml.clone() {
         Yaml::Hash(h) => h,
         _ => unreachable!(),
@@ -136,7 +136,7 @@ pub(crate) fn get_env_for_run_step(step: Rc<ActionsRunStep>) -> Box<dyn Iterator
                     }
                 };
 
-                Some(Token::NameValuePair(Rc::from((key, value))))
+                Some(Token::NameValuePair(Arc::from((key, value))))
             }),
     )
 }

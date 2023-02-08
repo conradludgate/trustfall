@@ -1,14 +1,14 @@
 [workspace]
 members = [
     "trustfall_core",
-    "trustfall_filetests_macros",
-    "trustfall_wasm",
-    "pytrustfall",
+    # "trustfall_filetests_macros",
+    # "trustfall_wasm",
+    # "pytrustfall",
     "demo-hackernews",
-    "demo-metar",
-    "demo-feeds",
+    # "demo-metar",
+    # "demo-feeds",
     "demo-hytradboi",
-    "experiments/schemaless",
-    "experiments/schemaless_wasm",
-    "experiments/trustfall_rustdoc",
+    # "experiments/schemaless",
+    # "experiments/schemaless_wasm",
+    # "experiments/trustfall_rustdoc",
 ]

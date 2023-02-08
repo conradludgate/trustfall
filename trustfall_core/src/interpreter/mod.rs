@@ -1,5 +1,6 @@
-use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
+use std::{collections::BTreeMap, fmt::Debug, num::NonZeroUsize, sync::Arc};
 
+use actix::{Message, Recipient};
 use async_graphql_parser::types::Type;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ use crate::{
 
 use self::error::QueryArgumentsError;
 
+pub mod actor_execution;
 pub mod basic_adapter;
 pub mod error;
 pub mod execution;
@@ -22,15 +24,19 @@ pub mod macros;
 pub mod replay;
 pub mod trace;
 
+// vertex: is represented by a token
+// edge: is a mapping from token -> [token]
+// folded_contexts
+
 #[derive(Debug, Clone)]
 pub struct DataContext<DataToken: Clone + Debug> {
     pub current_token: Option<DataToken>,
     tokens: BTreeMap<Vid, Option<DataToken>>,
     values: Vec<FieldValue>,
     suspended_tokens: Vec<Option<DataToken>>,
-    folded_contexts: BTreeMap<Eid, Vec<DataContext<DataToken>>>,
+    folded_contexts: BTreeMap<Eid, Vec<Self>>,
     folded_values: BTreeMap<(Eid, Arc<str>), Option<ValueOrVec>>,
-    piggyback: Option<Vec<DataContext<DataToken>>>,
+    piggyback: Option<Vec<Self>>,
     imported_tags: BTreeMap<FieldRef, FieldValue>,
 }
 
@@ -347,18 +353,96 @@ fn validate_argument_type(
     }
 }
 
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct Node<Token: Clone + Debug>(pub Token);
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct Vertex<Token: Clone + Debug>(pub DataContext<Token>);
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct Edge<Token: Clone + Debug + Send + 'static>(
+    pub DataContext<Token>,
+    pub Recipient<Node<Token>>,
+);
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct Property<Token: Clone + Debug + Send + 'static>(
+    pub DataContext<Token>,
+    pub FieldValue,
+);
+
+// impl<Token: Clone + Debug + 'static> Message for Property<Token> {
+//     type Result = (DataContext<Token>, FieldValue);
+// }
+// impl<Token: Clone + Debug> Message for Edge<Token> {
+//     type Result = ();
+// }
+// impl<Token: Clone + Debug> Message for Node<Token> {
+//     type Result = ();
+// }
+// impl<Token: Clone + Debug + 'static> Message for Coerce<Token> {
+//     type Result = (DataContext<Token>, bool);
+// }
+
+pub trait ActixAdapter {
+    type DataToken: Send + Clone + Debug + 'static;
+
+    /// Start an actor that can handle extracting properties of `field_name`
+    /// out of `current_type_name` typed values.
+    fn property_actor(
+        &self,
+        current_type_name: Arc<str>,
+        field_name: Arc<str>,
+        recipient: Recipient<Property<Self::DataToken>>,
+    ) -> Recipient<Vertex<Self::DataToken>>;
+
+    /// Start an actor that can handle following edges of `edge_name`
+    /// from `current_type_name` typed values, sending them to the recipient.
+    fn edge_actor(
+        &self,
+        current_type_name: Arc<str>,
+        edge_name: Arc<str>,
+        parameters: Option<Arc<EdgeParameters>>,
+    ) -> Recipient<Edge<Self::DataToken>>;
+
+    /// Start an actor that can handle coercing `current_type_name` typed values
+    /// into `coerce_to_type_name` values
+    fn coerce_actor(
+        &self,
+        current_type_name: Arc<str>,
+        coerce_to_type_name: Arc<str>,
+        recipient: Recipient<Vertex<Self::DataToken>>,
+    ) -> Recipient<Vertex<Self::DataToken>>;
+}
+
 pub trait Adapter<'token> {
     type DataToken: Clone + Debug + 'token;
 
+    /// Follow the edge from the root of the graph
     fn get_starting_tokens(
         &mut self,
         edge: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
         query_hint: InterpretedQuery,
         vertex_hint: Vid,
-    ) -> Box<dyn Iterator<Item = Self::DataToken> + 'token>;
+    ) -> Box<dyn Iterator<Item = Self::DataToken> + 'token> {
+        self.project_neighbors(
+            Box::new(std::iter::once(DataContext::new(None))),
+            Arc::from("@"),
+            edge,
+            parameters,
+            query_hint,
+            vertex_hint,
+            Eid(NonZeroUsize::new(usize::MAX).unwrap()),
+        )
+        .next()
+        .unwrap()
+        .1
+    }
 
     #[allow(clippy::type_complexity)]
+    /// Get a property on the current node
     fn project_property(
         &mut self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
@@ -370,6 +454,7 @@ pub trait Adapter<'token> {
 
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
+    /// Follow an edge from this node to get new nodes
     fn project_neighbors(
         &mut self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,

@@ -1,21 +1,20 @@
 #![allow(dead_code)]
 
-use std::{fs, sync::Arc};
+use std::{fs, rc::Rc, sync::Arc};
 
+use futures::{stream, Stream, StreamExt};
 use git_url_parse::GitUrl;
-use hn_api::{types::Item, HnClient};
-use lazy_static::__Deref;
+use hn_api::types::{Item, User};
 use octorust::types::{ContentFile, FullRepository};
-use tokio::runtime::Runtime;
 use tracing::instrument;
 use trustfall_core::{
-    interpreter::{Adapter, DataContext, InterpretedQuery},
+    interpreter::{ActixAdapter, Adapter, DataContext, InterpretedQuery},
     ir::{EdgeParameters, Eid, FieldValue, Vid},
 };
 
 use crate::{
     actions_parser::{get_env_for_run_step, get_jobs_in_workflow_file, get_steps_in_job},
-    pagers::{CratesPager, WorkflowsPager},
+    pagers::WorkflowsPager,
     token::{Repository, Token},
     util::{get_owner_and_repo, Pager},
 };
@@ -23,8 +22,6 @@ use crate::{
 const USER_AGENT: &str = "demo-hytradboi (github.com/obi1kenobi/trustfall)";
 
 lazy_static! {
-    static ref HN_CLIENT: HnClient = HnClient::init().unwrap();
-    static ref CRATES_CLIENT: consecrates::Client = consecrates::Client::new(USER_AGENT);
     static ref GITHUB_CLIENT: octorust::Client = octorust::Client::new(
         USER_AGENT,
         Some(octorust::auth::Credentials::Token(
@@ -39,12 +36,9 @@ lazy_static! {
     .unwrap();
     static ref REPOS_CLIENT: octorust::repos::Repos =
         octorust::repos::Repos::new(GITHUB_CLIENT.clone());
-    static ref RUNTIME: Runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
 }
 
+#[derive(Clone, Copy)]
 pub struct DemoAdapter;
 
 impl DemoAdapter {
@@ -52,76 +46,87 @@ impl DemoAdapter {
         Self
     }
 
-    fn front_page(&self) -> Box<dyn Iterator<Item = Token>> {
-        self.top(Some(30))
+    async fn front_page(self) -> Box<dyn Stream<Item = Token>> {
+        self.top(Some(30)).await
     }
 
-    fn top(&self, max: Option<usize>) -> Box<dyn Iterator<Item = Token>> {
-        let iterator = HN_CLIENT
-            .get_top_stories()
+    async fn get(self, id: u32) -> Option<Token> {
+        reqwest::get(format!(
+            "https://hacker-news.firebaseio.com/v0/item/{id}.json"
+        ))
+        .await
+        .ok()?
+        .json::<Option<Item>>()
+        .await
+        .ok()
+        .flatten()
+        .map(Token::from)
+    }
+
+    async fn top_stories(&self) -> Vec<u32> {
+        reqwest::get("https://hacker-news.firebaseio.com/v0/topstories.json")
+            .await
             .unwrap()
-            .into_iter()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    async fn top(self, max: Option<usize>) -> Box<dyn Stream<Item = Token> + 'static> {
+        let iterator = stream::iter(self.top_stories().await)
             .take(max.unwrap_or(usize::MAX))
-            .filter_map(|id| match HN_CLIENT.get_item(id) {
-                Ok(maybe_item) => maybe_item.map(|item| item.into()),
-                Err(e) => {
-                    eprintln!("Got an error while fetching item: {e}");
-                    None
-                }
-            });
+            .filter_map(move |id| self.get(id));
 
         Box::new(iterator)
     }
 
-    fn latest_stories(&self, max: Option<usize>) -> Box<dyn Iterator<Item = Token>> {
+    async fn latest_stories(self, max: Option<usize>) -> Box<dyn Stream<Item = Token>> {
         // Unfortunately, the HN crate we're using doesn't support getting the new stories,
         // so we're doing it manually here.
         let story_ids: Vec<u32> =
-            reqwest::blocking::get("https://hacker-news.firebaseio.com/v0/newstories.json")
+            reqwest::get("https://hacker-news.firebaseio.com/v0/newstories.json")
+                .await
                 .unwrap()
                 .json()
+                .await
                 .unwrap();
 
-        let iterator = story_ids
-            .into_iter()
+        let iterator = stream::iter(story_ids)
             .take(max.unwrap_or(usize::MAX))
-            .map(move |id| HN_CLIENT.get_item(id))
-            .filter_map(|res| match res {
-                Ok(maybe_item) => maybe_item.map(|item| item.into()),
-                Err(e) => {
-                    eprintln!("Got an error while fetching item: {e}");
-                    None
-                }
-            });
+            .filter_map(move |id| self.get(id));
 
         Box::new(iterator)
     }
 
-    fn user(&self, username: &str) -> Box<dyn Iterator<Item = Token>> {
-        match HN_CLIENT.get_user(username) {
-            Ok(Some(user)) => {
+    async fn user(self, username: &str) -> Option<Token> {
+        match reqwest::get(format!(
+            "https://hacker-news.firebaseio.com/v0/user/{username}.json"
+        ))
+        .await
+        .unwrap()
+        .json::<Option<User>>()
+        .await
+        .unwrap()
+        {
+            Some(user) => {
                 // Found a user by that name.
                 let token = Token::from(user);
-                Box::new(std::iter::once(token))
+                Some(token)
             }
-            Ok(None) => {
+            None => {
                 // The request succeeded but did not find a user by that name.
-                Box::new(std::iter::empty())
-            }
-            Err(e) => {
-                eprintln!("Got an error while getting user profile for user {username}: {e}",);
-                Box::new(std::iter::empty())
+                None
             }
         }
     }
 
-    fn most_downloaded_crates(&self) -> Box<dyn Iterator<Item = Token>> {
-        Box::new(
-            CratesPager::new(CRATES_CLIENT.deref())
-                .into_iter()
-                .map(|x| x.into()),
-        )
-    }
+    // fn most_downloaded_crates(&self) -> Box<dyn Iterator<Item = Token>> {
+    //     Box::new(
+    //         CratesPager::new(CRATES_CLIENT.deref())
+    //             .into_iter()
+    //             .map(|x| x.into()),
+    //     )
+    // }
 }
 
 macro_rules! impl_item_property {
@@ -189,54 +194,50 @@ macro_rules! impl_property {
     };
 }
 
-impl Adapter<'static> for DemoAdapter {
+impl ActixAdapter for DemoAdapter {
     type DataToken = Token;
 
-    #[instrument(skip_all, fields(edge))]
-    fn get_starting_tokens(
-        &mut self,
-        edge: Arc<str>,
-        parameters: Option<Arc<EdgeParameters>>,
-        _query_hint: InterpretedQuery,
-        _vertex_hint: Vid,
-    ) -> Box<dyn Iterator<Item = Self::DataToken>> {
-        match edge.as_ref() {
-            "HackerNewsFrontPage" => self.front_page(),
-            "HackerNewsTop" => {
-                // TODO: This is unergonomic, build a more convenient API here.
-                let max = parameters
-                    .unwrap()
-                    .0
-                    .get("max")
-                    .map(|v| v.as_u64().unwrap() as usize);
-                self.top(max)
-            }
-            "HackerNewsLatestStories" => {
-                // TODO: This is unergonomic, build a more convenient API here.
-                let max = parameters
-                    .unwrap()
-                    .0
-                    .get("max")
-                    .map(|v| v.as_u64().unwrap() as usize);
-                self.latest_stories(max)
-            }
-            "HackerNewsUser" => {
-                let username_value = parameters.as_ref().unwrap().0.get("name").unwrap();
-                self.user(username_value.as_str().unwrap())
-            }
-            "MostDownloadedCrates" => self.most_downloaded_crates(),
-            _ => unreachable!(),
-        }
-    }
+    // #[instrument(skip_all, fields(edge))]
+    // fn get_starting_tokens(
+    //     &mut self,
+    //     edge: Arc<str>,
+    //     parameters: Option<Arc<EdgeParameters>>,
+    //     _query_hint: InterpretedQuery,
+    //     _vertex_hint: Vid,
+    // ) -> Box<dyn Iterator<Item = Self::DataToken>> {
+    //     match edge.as_ref() {
+    //         "HackerNewsFrontPage" => self.front_page(),
+    //         "HackerNewsTop" => {
+    //             // TODO: This is unergonomic, build a more convenient API here.
+    //             let max = parameters
+    //                 .unwrap()
+    //                 .0
+    //                 .get("max")
+    //                 .map(|v| v.as_u64().unwrap() as usize);
+    //             self.top(max)
+    //         }
+    //         "HackerNewsLatestStories" => {
+    //             // TODO: This is unergonomic, build a more convenient API here.
+    //             let max = parameters
+    //                 .unwrap()
+    //                 .0
+    //                 .get("max")
+    //                 .map(|v| v.as_u64().unwrap() as usize);
+    //             self.latest_stories(max)
+    //         }
+    //         "HackerNewsUser" => {
+    //             let username_value = parameters.as_ref().unwrap().0.get("name").unwrap();
+    //             self.user(username_value.as_str().unwrap())
+    //         }
+    //         _ => unreachable!(),
+    //     }
+    // }
 
-    #[instrument(skip_all, fields(current_type_name, field_name))]
-    fn project_property(
-        &mut self,
+    fn property_actor(
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
-        _query_hint: InterpretedQuery,
-        _vertex_hint: Vid,
     ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, FieldValue)>> {
         match (current_type_name.as_ref(), field_name.as_ref()) {
             (_, "__typename") => Box::new(data_contexts.map(|ctx| {
@@ -295,10 +296,6 @@ impl Adapter<'static> for DemoAdapter {
             ("HackerNewsUser", "about") => impl_property!(data_contexts, as_user, about),
             ("HackerNewsUser", "unixCreatedAt") => impl_property!(data_contexts, as_user, created),
             ("HackerNewsUser", "delay") => impl_property!(data_contexts, as_user, delay),
-
-            // properties on Crate
-            ("Crate", "name") => impl_property!(data_contexts, as_crate, name),
-            ("Crate", "latestVersion") => impl_property!(data_contexts, as_crate, max_version),
 
             // properties on Webpage
             ("Webpage" | "Repository" | "GitHubRepository", "url") => {
@@ -369,16 +366,12 @@ impl Adapter<'static> for DemoAdapter {
         }
     }
 
-    #[instrument(skip_all, fields(edge_name, current_type_name))]
-    fn project_neighbors(
+    fn edge_actor(
         &mut self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
         _parameters: Option<Arc<EdgeParameters>>,
-        _query_hint: InterpretedQuery,
-        _vertex_hint: Vid,
-        _edge_hint: Eid,
     ) -> Box<
         dyn Iterator<
             Item = (
@@ -622,24 +615,6 @@ impl Adapter<'static> for DemoAdapter {
 
                 (ctx, neighbors)
             })),
-            ("Crate", "repository") => Box::new(data_contexts.map(|ctx| {
-                let token = ctx.current_token.clone();
-                let neighbors: Box<dyn Iterator<Item = Self::DataToken>> = match token {
-                    None => Box::new(std::iter::empty()),
-                    Some(token) => {
-                        let cr = token.as_crate().unwrap();
-                        match cr.repository.as_ref() {
-                            None => Box::new(std::iter::empty()),
-                            Some(repo) => {
-                                let token = resolve_url(repo.as_str());
-                                Box::new(token.into_iter())
-                            }
-                        }
-                    }
-                };
-
-                (ctx, neighbors)
-            })),
             ("GitHubRepository", "workflows") => Box::new(data_contexts.map(|ctx| {
                 let token = ctx.current_token.clone();
                 let neighbors: Box<dyn Iterator<Item = Self::DataToken>> = match token {
@@ -665,7 +640,7 @@ impl Adapter<'static> for DemoAdapter {
                         match workflow_content {
                             None => Box::new(std::iter::empty()),
                             Some(content) => {
-                                let content = Arc::new(content);
+                                let content = Rc::new(content);
                                 get_jobs_in_workflow_file(content)
                             }
                         }
@@ -698,15 +673,12 @@ impl Adapter<'static> for DemoAdapter {
         }
     }
 
-    #[instrument(skip_all, fields(current_type_name, coerce_to_type_name))]
-    fn can_coerce_to_type(
-        &mut self,
-        data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
+    fn coerce_actor(
+        &self,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,
-        _query_hint: InterpretedQuery,
-        _vertex_hint: Vid,
-    ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, bool)>> {
+        recipient: Recipient<trustfall_core::interpreter::Vertex<Self::DataToken>>,
+    ) -> Recipient<trustfall_core::interpreter::Vertex<Self::DataToken>> {
         let iterator = data_contexts.map(move |ctx| {
             let token = match &ctx.current_token {
                 Some(t) => t,
@@ -743,7 +715,7 @@ impl Adapter<'static> for DemoAdapter {
 fn resolve_url(url: &str) -> Option<Token> {
     // HACK: Avoiding this bug https://github.com/tjtelan/git-url-parse-rs/issues/22
     if !url.contains("github.com") && !url.contains("gitlab.com") {
-        return Some(Token::Webpage(Arc::from(url)));
+        return Some(Token::Webpage(Rc::from(url)));
     }
 
     let maybe_git_url = GitUrl::parse(url);
@@ -752,7 +724,7 @@ fn resolve_url(url: &str) -> Option<Token> {
             if git_url.fullname != git_url.path.trim_matches('/') {
                 // The link points *within* the repo rather than *at* the repo.
                 // This is just a regular link to a webpage.
-                Some(Token::Webpage(Arc::from(url)))
+                Some(Token::Webpage(Rc::from(url)))
             } else if matches!(git_url.host, Some(x) if x == "github.com") {
                 let future = REPOS_CLIENT.get(
                     git_url
@@ -763,17 +735,17 @@ fn resolve_url(url: &str) -> Option<Token> {
                     git_url.name.as_str(),
                 );
                 match RUNTIME.block_on(future) {
-                    Ok(repo) => Some(Repository::new(url.to_string(), Arc::new(repo)).into()),
+                    Ok(repo) => Some(Repository::new(url.to_string(), Rc::new(repo)).into()),
                     Err(e) => {
                         eprintln!("Error getting repository information for url {url}: {e}",);
                         None
                     }
                 }
             } else {
-                Some(Token::Repository(Arc::from(url)))
+                Some(Token::Repository(Rc::from(url)))
             }
         }
-        Err(..) => Some(Token::Webpage(Arc::from(url))),
+        Err(..) => Some(Token::Webpage(Rc::from(url))),
     }
 }
 

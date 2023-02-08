@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 
 use consecrates::{api::Crate, Query, Sorting};
 use tokio::runtime::Runtime;
@@ -87,7 +87,7 @@ impl<'a> Pager for WorkflowsPager<'a> {
                         response
                             .workflows
                             .into_iter()
-                            .map(|w| RepoWorkflow::new(repo_clone.repo.clone(), Rc::new(w)))
+                            .map(|w| RepoWorkflow::new(repo_clone.repo.clone(), Arc::new(w)))
                             .collect::<Vec<_>>()
                             .into_iter(),
                     )
@@ -96,7 +96,7 @@ impl<'a> Pager for WorkflowsPager<'a> {
                         response
                             .workflows
                             .into_iter()
-                            .map(|w| RepoWorkflow::new(repo_clone.repo.clone(), Rc::new(w)))
+                            .map(|w| RepoWorkflow::new(repo_clone.repo.clone(), Arc::new(w)))
                             .collect::<Vec<_>>()
                             .into_iter(),
                     )

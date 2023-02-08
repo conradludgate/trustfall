@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{sync::Arc};
 
 use consecrates::api::Crate;
 use hn_api::types::{Comment, Item, Job, Story, User};
@@ -8,42 +8,42 @@ use yaml_rust::Yaml;
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum Token {
-    HackerNewsItem(Rc<Item>),
-    HackerNewsStory(Rc<Story>),
-    HackerNewsJob(Rc<Job>),
-    HackerNewsComment(Rc<Comment>),
-    HackerNewsUser(Rc<User>),
-    Crate(Rc<Crate>),
-    Repository(Rc<str>),
-    GitHubRepository(Rc<Repository>),
-    GitHubWorkflow(Rc<RepoWorkflow>),
-    GitHubActionsJob(Rc<ActionsJob>),
-    GitHubActionsImportedStep(Rc<ActionsImportedStep>),
-    GitHubActionsRunStep(Rc<ActionsRunStep>),
-    NameValuePair(Rc<(String, String)>),
-    Webpage(Rc<str>),
+    HackerNewsItem(Arc<Item>),
+    HackerNewsStory(Arc<Story>),
+    HackerNewsJob(Arc<Job>),
+    HackerNewsComment(Arc<Comment>),
+    HackerNewsUser(Arc<User>),
+    Crate(Arc<Crate>),
+    Repository(Arc<str>),
+    GitHubRepository(Arc<Repository>),
+    GitHubWorkflow(Arc<RepoWorkflow>),
+    GitHubActionsJob(Arc<ActionsJob>),
+    GitHubActionsImportedStep(Arc<ActionsImportedStep>),
+    GitHubActionsRunStep(Arc<ActionsRunStep>),
+    NameValuePair(Arc<(String, String)>),
+    Webpage(Arc<str>),
 }
 
 #[derive(Debug, Clone)]
 pub struct Repository {
     pub url: String,
-    pub repo: Rc<FullRepository>,
+    pub repo: Arc<FullRepository>,
 }
 
 impl Repository {
-    pub(crate) fn new(url: String, repo: Rc<FullRepository>) -> Self {
+    pub(crate) fn new(url: String, repo: Arc<FullRepository>) -> Self {
         Self { url, repo }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct RepoWorkflow {
-    pub repo: Rc<FullRepository>,
-    pub workflow: Rc<Workflow>,
+    pub repo: Arc<FullRepository>,
+    pub workflow: Arc<Workflow>,
 }
 
 impl RepoWorkflow {
-    pub(crate) fn new(repo: Rc<FullRepository>, workflow: Rc<Workflow>) -> Self {
+    pub(crate) fn new(repo: Arc<FullRepository>, workflow: Arc<Workflow>) -> Self {
         Self { repo, workflow }
     }
 }
@@ -229,66 +229,66 @@ impl Token {
 
 impl From<Item> for Token {
     fn from(item: Item) -> Self {
-        Self::HackerNewsItem(Rc::from(item))
+        Self::HackerNewsItem(Arc::from(item))
     }
 }
 
 impl From<Story> for Token {
     fn from(s: Story) -> Self {
-        Self::HackerNewsStory(Rc::from(s))
+        Self::HackerNewsStory(Arc::from(s))
     }
 }
 
 impl From<Job> for Token {
     fn from(j: Job) -> Self {
-        Self::HackerNewsJob(Rc::from(j))
+        Self::HackerNewsJob(Arc::from(j))
     }
 }
 
 impl From<Comment> for Token {
     fn from(c: Comment) -> Self {
-        Self::HackerNewsComment(Rc::from(c))
+        Self::HackerNewsComment(Arc::from(c))
     }
 }
 
 impl From<User> for Token {
     fn from(u: User) -> Self {
-        Self::HackerNewsUser(Rc::from(u))
+        Self::HackerNewsUser(Arc::from(u))
     }
 }
 
 impl From<Crate> for Token {
     fn from(c: Crate) -> Self {
-        Self::Crate(Rc::from(c))
+        Self::Crate(Arc::from(c))
     }
 }
 
 impl From<Repository> for Token {
     fn from(r: Repository) -> Self {
-        Self::GitHubRepository(Rc::from(r))
+        Self::GitHubRepository(Arc::from(r))
     }
 }
 
 impl From<RepoWorkflow> for Token {
     fn from(w: RepoWorkflow) -> Self {
-        Self::GitHubWorkflow(Rc::from(w))
+        Self::GitHubWorkflow(Arc::from(w))
     }
 }
 
 impl From<ActionsJob> for Token {
     fn from(j: ActionsJob) -> Self {
-        Self::GitHubActionsJob(Rc::from(j))
+        Self::GitHubActionsJob(Arc::from(j))
     }
 }
 
 impl From<ActionsImportedStep> for Token {
     fn from(imp: ActionsImportedStep) -> Self {
-        Self::GitHubActionsImportedStep(Rc::from(imp))
+        Self::GitHubActionsImportedStep(Arc::from(imp))
     }
 }
 
 impl From<ActionsRunStep> for Token {
     fn from(r: ActionsRunStep) -> Self {
-        Self::GitHubActionsRunStep(Rc::from(r))
+        Self::GitHubActionsRunStep(Arc::from(r))
     }
 }
