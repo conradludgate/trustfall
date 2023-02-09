@@ -1,16 +1,17 @@
 use std::collections::BTreeMap;
 use std::env;
-use std::rc::Rc;
+use std::fs;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use std::{cell::RefCell, fs};
+use std::time::Duration;
 
-use adapter::DemoAdapter;
+use actix::{Actor as _, System};
+use async_adapter::DemoAdapter;
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
+use trustfall_core::interpreter::actor_execution::Output;
 use trustfall_core::ir::TransparentValue;
 use trustfall_core::{
-    frontend::parse, interpreter::execution::interpret_ir, ir::FieldValue, schema::Schema,
+    frontend::parse, interpreter::actor_execution::interpret_ir, ir::FieldValue, schema::Schema,
 };
 
 use tracing_subscriber::{prelude::*, Registry};
@@ -18,9 +19,9 @@ use tracing_subscriber::{prelude::*, Registry};
 #[macro_use]
 extern crate lazy_static;
 
-mod async_adapter;
 mod actions_parser;
 mod adapter;
+mod async_adapter;
 mod pagers;
 mod token;
 mod util;
@@ -37,75 +38,45 @@ struct InputQuery<'a> {
     args: Arc<BTreeMap<Arc<str>, FieldValue>>,
 }
 
-fn execute_query(path: &str) {
+#[actix_rt::main]
+async fn execute_query(path: &str) {
     let content = fs::read_to_string(path).unwrap();
     let input_query: InputQuery = ron::from_str(&content).unwrap();
 
-    let adapter = Rc::new(RefCell::new(DemoAdapter::new()));
+    let adapter = Arc::new(DemoAdapter::new());
 
     let query = parse(&SCHEMA, input_query.query).unwrap();
     let arguments = input_query.args;
 
-    let max_results = 20usize;
+    // let max_results = 20usize;
 
-    println!("Executing query:");
-    println!("{}", input_query.query.trim());
-
-    // Printing "prettily" (without the enum wrapper that captures the value type)
-    // unfortunately takes a bit of ceremony at the moment.
-    println!("\nQuery args:");
-    println!(
-        "{:?}",
-        arguments
-            .as_ref()
-            .clone()
-            .into_iter()
-            .map(|(k, v)| (
-                k,
-                serde_json::to_string_pretty(&TransparentValue::from(v)).unwrap()
-            ))
-            .collect::<BTreeMap<_, _>>()
-    );
-
-    println!("\nGetting max {max_results} results to avoid exhausting rate limit budgets.");
-
-    let mut total_query_duration: Duration = Default::default();
-    let mut current_instant = Instant::now();
-    for (index, data_item) in interpret_ir(adapter, query, arguments).unwrap().enumerate() {
-        let next_item_duration = current_instant.elapsed();
-        total_query_duration += next_item_duration;
-
-        // Use the value variant with an untagged enum serialization, to make the printout cleaner.
-        let data_item: BTreeMap<Arc<str>, TransparentValue> =
-            data_item.into_iter().map(|(k, v)| (k, v.into())).collect();
-
-        let result_number = index + 1;
-        println!(
-            "\nResult {result_number} fetched in {next_item_duration:?}, {}",
-            serde_json::to_string_pretty(&data_item).unwrap()
-        );
-
-        // Uncomment the following line when recording the shell session,
-        // to ensure each result gets at least one frame in the output.
-        // Otherwise, all results get dumped in the shell all at once.
-        // std::thread::sleep(Duration::from_millis(16));
-
-        // Safety valve: we're using rate-limited APIs.
-        // Don't exhaust entire API call budget at once!
-        if result_number == max_results {
-            println!(
-                "\nFetched {max_results} results in {total_query_duration:?}; \
-                terminating iteration to avoid exhausting rate limit budget."
-            );
-            break;
-        }
-
-        current_instant = Instant::now();
+    struct Actor;
+    impl actix::Actor for Actor {
+        type Context = actix::Context<Self>;
     }
+    impl actix::Handler<Output> for Actor {
+        type Result = ();
+        fn handle(&mut self, msg: Output, _: &mut Self::Context) -> Self::Result {
+            let data_item: BTreeMap<Arc<str>, TransparentValue> =
+                msg.0.into_iter().map(|(k, v)| (k, v.into())).collect();
+
+            println!(
+                "\nResult  fetched, {}",
+                serde_json::to_string_pretty(&data_item).unwrap()
+            );
+        }
+    }
+    let actor = Actor.start();
+    interpret_ir(adapter, query, arguments, actor.recipient());
+
+    actix_rt::time::sleep(Duration::from_secs(10)).await;
+
+    System::current().stop()
 }
 
 fn main() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("trustfall_core=debug,demo_hytradboi=debug,warn"));
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("trustfall_core=debug,demo_hytradboi=debug,warn"));
 
     let formatting_layer = tracing_tree::HierarchicalLayer::default()
         .with_writer(tracing_subscriber::fmt::TestWriter::new())

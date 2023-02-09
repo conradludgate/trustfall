@@ -27,7 +27,8 @@ impl<DataToken: Clone + Debug + Send + 'static + Unpin> Handler<Node<DataToken>>
     type Result = ();
 
     fn handle(&mut self, msg: Node<DataToken>, _ctx: &mut Self::Context) -> Self::Result {
-        self.recipient.do_send(Vertex(DataContext::new(Some(msg.0))));
+        self.recipient
+            .do_send(Vertex(DataContext::new(Some(msg.0))));
     }
 }
 
@@ -128,6 +129,7 @@ impl Actor for OutputActor {
 impl<DataToken: Clone + Debug + Send + 'static + Unpin> Handler<Vertex<DataToken>> for OutputActor {
     type Result = ();
 
+    #[tracing::instrument("output1", skip_all)]
     fn handle(&mut self, mut msg: Vertex<DataToken>, _ctx: &mut Self::Context) -> Self::Result {
         assert!(msg.0.values.len() == self.output_names.len());
 
@@ -161,6 +163,7 @@ impl<DataToken: Clone + Debug + Send + 'static + Unpin> Handler<Vertex<DataToken
 {
     type Result = ();
 
+    #[tracing::instrument("output3", skip_all)]
     fn handle(&mut self, msg: Vertex<DataToken>, _ctx: &mut Self::Context) -> Self::Result {
         let Vertex(mut context) = msg;
         let new_token = context.tokens[&self.vertex_id].clone();
@@ -183,6 +186,7 @@ impl<DataToken: Clone + Debug + Send + 'static + Unpin> Handler<Property<DataTok
 {
     type Result = ();
 
+    #[tracing::instrument("output2", skip_all)]
     fn handle(&mut self, msg: Property<DataToken>, _ctx: &mut Self::Context) -> Self::Result {
         let Property(mut context, value) = msg;
         context.values.push(value);
@@ -305,6 +309,7 @@ impl<Token: Debug + Clone + Send + 'static + Unpin> Handler<Vertex<Token>>
 {
     type Result = ();
 
+    #[tracing::instrument("edge_outer", skip_all)]
     fn handle(&mut self, msg: Vertex<Token>, _ctx: &mut Self::Context) -> Self::Result {
         let two = EdgeExpanderActor2 {
             context: msg.0.clone(),
@@ -315,9 +320,7 @@ impl<Token: Debug + Clone + Send + 'static + Unpin> Handler<Vertex<Token>>
         .start()
         .recipient();
 
-        self.recipient1.do_send(Edge(msg.0, two));
-
-        todo!()
+        self.recipient1.do_send(Edge(msg.0, two))
     }
 }
 
@@ -351,6 +354,7 @@ impl<Token: Debug + Clone + Send + 'static + Unpin> Handler<Node<Token>>
 {
     type Result = ();
 
+    #[tracing::instrument("edge_inner", skip_all)]
     fn handle(&mut self, neighbour: Node<Token>, _ctx: &mut Self::Context) -> Self::Result {
         self.has_neighbors = true;
         self.recipient.do_send(Vertex(

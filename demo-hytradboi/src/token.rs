@@ -1,4 +1,4 @@
-use std::{sync::Arc};
+use std::sync::Arc;
 
 use consecrates::api::Crate;
 use hn_api::types::{Comment, Item, Job, Story, User};
@@ -290,5 +290,117 @@ impl From<ActionsImportedStep> for Token {
 impl From<ActionsRunStep> for Token {
     fn from(r: ActionsRunStep) -> Self {
         Self::GitHubActionsRunStep(Arc::from(r))
+    }
+}
+
+impl<'a> TryFrom<&'a Token> for &'a Item {
+    type Error = ();
+    fn try_from(t: &'a Token) -> Result<Self, Self::Error> {
+        match t {
+            Token::HackerNewsItem(x) => Ok(x),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a Token> for &'a Story {
+    type Error = ();
+    fn try_from(t: &'a Token) -> Result<Self, Self::Error> {
+        match t {
+            Token::HackerNewsStory(x) => Ok(x),
+            Token::HackerNewsItem(i) => match &**i {
+                Item::Story(s) => Ok(s),
+                _ => Err(()),
+            },
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a Token> for &'a Job {
+    type Error = ();
+    fn try_from(t: &'a Token) -> Result<Self, Self::Error> {
+        match t {
+            Token::HackerNewsJob(x) => Ok(x),
+            Token::HackerNewsItem(i) => match &**i {
+                Item::Job(s) => Ok(s),
+                _ => Err(()),
+            },
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a Token> for &'a Comment {
+    type Error = ();
+    fn try_from(t: &'a Token) -> Result<Self, Self::Error> {
+        match t {
+            Token::HackerNewsComment(x) => Ok(x),
+            Token::HackerNewsItem(i) => match &**i {
+                Item::Comment(s) => Ok(s),
+                _ => Err(()),
+            },
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a Token> for &'a User {
+    type Error = ();
+    fn try_from(t: &'a Token) -> Result<Self, Self::Error> {
+        match t {
+            Token::HackerNewsUser(x) => Ok(x),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a Token> for &'a Repository {
+    type Error = ();
+    fn try_from(t: &'a Token) -> Result<Self, Self::Error> {
+        match t {
+            Token::GitHubRepository(x) => Ok(x),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a Token> for &'a RepoWorkflow {
+    type Error = ();
+    fn try_from(t: &'a Token) -> Result<Self, Self::Error> {
+        match t {
+            Token::GitHubWorkflow(x) => Ok(x),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a Token> for &'a ActionsJob {
+    type Error = ();
+    fn try_from(t: &'a Token) -> Result<Self, Self::Error> {
+        match t {
+            Token::GitHubActionsJob(x) => Ok(x),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a Token> for &'a ActionsImportedStep {
+    type Error = ();
+    fn try_from(t: &'a Token) -> Result<Self, Self::Error> {
+        match t {
+            Token::GitHubActionsImportedStep(x) => Ok(x),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a Token> for &'a ActionsRunStep {
+    type Error = ();
+    fn try_from(t: &'a Token) -> Result<Self, Self::Error> {
+        match t {
+            Token::GitHubActionsRunStep(x) => Ok(x),
+            _ => Err(()),
+        }
     }
 }

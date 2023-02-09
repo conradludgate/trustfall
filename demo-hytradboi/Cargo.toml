@@ -32,3 +32,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-tree = "0.2"
 tracing = "0.1"
 futures = "0.3"
+actix = "0.13"
+actix-rt = "2.8"

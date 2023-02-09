@@ -3,7 +3,7 @@ InputQuery (
 {
   HackerNewsTop(max: 200) {
     ... on HackerNewsStory {
-      hn_score: score @filter(op: ">=", value: ["$min_score"]) @output
+      hn_score: score @output
 
       link {
         ... on GitHubRepository {
@@ -30,6 +30,6 @@ InputQuery (
   }
 }"#,
   args: {
-    "min_score": Uint64(10),
+   
   },
 )
