@@ -6,7 +6,10 @@ pub mod serialization;
 pub mod types;
 pub mod value;
 
-use std::{cmp::Ordering, collections::BTreeMap, fmt::Debug, num::NonZeroUsize, sync::Arc};
+use std::{
+    cmp::Ordering, collections::BTreeMap, convert::Infallible, fmt::Debug, num::NonZeroUsize,
+    sync::Arc,
+};
 
 use async_graphql_parser::types::{BaseType, Type};
 use async_graphql_value::Name;
@@ -481,6 +484,31 @@ where
                 Operation::NotRegexMatches(map_left(left)?, map_right(right)?)
             }
         })
+    }
+
+    pub fn right_only(self) -> Operation<(), RightT> {
+        match self {
+            Operation::IsNull(_) => Operation::IsNull(()),
+            Operation::IsNotNull(_) => Operation::IsNotNull(()),
+            Operation::Equals(_, arg) => Operation::Equals((), arg),
+            Operation::NotEquals(_, arg) => Operation::NotEquals((), arg),
+            Operation::LessThan(_, arg) => Operation::LessThan((), arg),
+            Operation::LessThanOrEqual(_, arg) => Operation::LessThanOrEqual((), arg),
+            Operation::GreaterThan(_, arg) => Operation::GreaterThan((), arg),
+            Operation::GreaterThanOrEqual(_, arg) => Operation::GreaterThanOrEqual((), arg),
+            Operation::Contains(_, arg) => Operation::Contains((), arg),
+            Operation::NotContains(_, arg) => Operation::NotContains((), arg),
+            Operation::OneOf(_, arg) => Operation::OneOf((), arg),
+            Operation::NotOneOf(_, arg) => Operation::NotOneOf((), arg),
+            Operation::HasPrefix(_, arg) => Operation::HasPrefix((), arg),
+            Operation::NotHasPrefix(_, arg) => Operation::NotHasPrefix((), arg),
+            Operation::HasSuffix(_, arg) => Operation::HasSuffix((), arg),
+            Operation::NotHasSuffix(_, arg) => Operation::NotHasSuffix((), arg),
+            Operation::HasSubstring(_, arg) => Operation::HasSubstring((), arg),
+            Operation::NotHasSubstring(_, arg) => Operation::NotHasSubstring((), arg),
+            Operation::RegexMatches(_, arg) => Operation::RegexMatches((), arg),
+            Operation::NotRegexMatches(_, arg) => Operation::NotRegexMatches((), arg),
+        }
     }
 }
 

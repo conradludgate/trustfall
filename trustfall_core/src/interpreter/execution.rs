@@ -440,13 +440,7 @@ fn compute_fold<'query, DataToken: Clone + Debug + 'query>(
             neighbor_contexts,
         );
 
-        let fold_elements = match collect_fold_elements(computed_iterator, &max_fold_size) {
-            None => {
-                // We were able to discard this fold early.
-                return None;
-            }
-            Some(f) => f,
-        };
+        let fold_elements = collect_fold_elements(computed_iterator, &max_fold_size)?;
         context
             .folded_contexts
             .insert_or_error(fold_eid, fold_elements)

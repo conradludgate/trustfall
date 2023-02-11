@@ -21,6 +21,7 @@ mod filtering;
 pub mod macros;
 pub mod replay;
 pub mod trace;
+pub mod query_plan;
 
 #[derive(Debug, Clone)]
 pub struct DataContext<DataToken: Clone + Debug> {
