@@ -6,10 +6,7 @@ pub mod serialization;
 pub mod types;
 pub mod value;
 
-use std::{
-    cmp::Ordering, collections::BTreeMap, convert::Infallible, fmt::Debug, num::NonZeroUsize,
-    sync::Arc,
-};
+use std::{cmp::Ordering, collections::BTreeMap, fmt::Debug, num::NonZeroUsize, sync::Arc};
 
 use async_graphql_parser::types::{BaseType, Type};
 use async_graphql_value::Name;

@@ -10,29 +10,50 @@ use crate::ir::{
     Recursive, Vid,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QueryPlan {
-    edge: Arc<str>,
-    vid: Vid,
-    plan: Vec<QueryPlanItem>,
+    pub params: Option<Arc<EdgeParameters>>,
+    pub edge: Arc<str>,
+    pub vid: Vid,
+    pub plan: Vec<QueryPlanItem>,
+    pub outputs: Vec<Arc<str>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProjectNeighbors {
-    type_name: Arc<str>,
-    edge_name: Arc<str>,
-    parameters: Option<Arc<EdgeParameters>>,
-    eid: Eid,
-    vid: Vid,
+    pub type_name: Arc<str>,
+    pub edge_name: Arc<str>,
+    pub parameters: Option<Arc<EdgeParameters>>,
+    pub eid: Eid,
+    pub vid: Vid,
 }
 
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub enum ProjectKind {
+    Values,
+    ImportedField(FieldRef),
+    Suspend,
+}
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum CoerceKind {
+    Filter,
+    // This coercion is unusual since it doesn't discard elements that can't be coerced.
+    // This is because we still want to produce those elements, and we simply want to
+    // not continue recursing deeper through them since they don't have the edge we need.
+    Suspend,
+}
+
+
+#[non_exhaustive]
+#[derive(Debug, Clone)]
 pub enum QueryPlanItem {
     Fold {
         neighbors: ProjectNeighbors,
         plan: Vec<QueryPlanItem>,
         tags: Vec<FieldRef>,
+        post_fold_filters: Vec<Operation<FoldSpecificFieldKind, Argument>>,
     },
     Recurse {
         neighbors: ProjectNeighbors,
@@ -45,42 +66,27 @@ pub enum QueryPlanItem {
         coerced_from: Arc<str>,
         coerce_to: Arc<str>,
         vid: Vid,
-    },
-    // This coercion is unusual since it doesn't discard elements that can't be coerced.
-    // This is because we still want to produce those elements, and we simply want to
-    // not continue recursing deeper through them since they don't have the edge we need.
-    CoerceOrSuspend {
-        coerced_from: Arc<str>,
-        coerce_to: Arc<str>,
-        vid: Vid,
+        kind: CoerceKind,
     },
     ProjectProperty {
         type_name: Arc<str>,
         vid: Vid,
         field_name: Arc<str>,
-    },
-    ProjectPropertyImported {
-        type_name: Arc<str>,
-        vid: Vid,
-        field_name: Arc<str>,
-        imported_field: FieldRef,
+        kind: ProjectKind,
     },
     Argument(Arc<str>),
     ImportTag(FieldRef),
     MoveTo(Vid),
-    PopSuspended,
     FoldCount(Eid),
     Record(Vid),
     Activate(Vid),
     SuspendNone,
-    CollectOutputs(Vec<Arc<str>>),
     PopIntoImport(FieldRef),
     Filter(Operation<(), Argument>),
     FoldOutputs {
         eid: Eid,
         vid: Vid,
         output_names: Vec<Arc<str>>,
-        outputs: BTreeMap<Arc<str>, ContextField>,
         fold_specific_outputs: BTreeMap<Arc<str>, FoldSpecificFieldKind>,
         folds: BTreeMap<Eid, Arc<IRFold>>,
         plan: Vec<QueryPlanItem>,
@@ -92,16 +98,19 @@ pub fn query_plan(indexed_query: Arc<IndexedQuery>) -> QueryPlan {
     let ir_query = &indexed_query.ir_query;
 
     let root_edge = ir_query.root_name.clone();
+    let root_edge_params = ir_query.root_parameters.clone();
     let component = &ir_query.root_component;
     let root_vid = component.root;
 
     let mut plan = compute_component(indexed_query.clone(), component);
-    construct_outputs(indexed_query, &mut plan);
+    let outputs = construct_outputs(&ir_query.root_component, &mut plan);
 
     QueryPlan {
         plan,
+        params: root_edge_params,
         edge: root_edge,
         vid: root_vid,
+        outputs,
     }
 }
 
@@ -126,6 +135,7 @@ fn perform_coercion(
         coerced_from,
         coerce_to,
         vid: vertex.vid,
+        kind: CoerceKind::Filter
     });
 }
 
@@ -193,12 +203,10 @@ fn compute_component(query: Arc<IndexedQuery>, component: &IRQueryComponent) -> 
     output
 }
 
-fn construct_outputs(query: Arc<IndexedQuery>, output: &mut Vec<QueryPlanItem>) {
-    let output_names = outputs(&query.ir_query.root_component, output);
-    output.push(QueryPlanItem::CollectOutputs(output_names));
-}
-
-fn outputs(component: &IRQueryComponent, output: &mut Vec<QueryPlanItem>) -> Vec<Arc<str>> {
+fn construct_outputs(
+    component: &IRQueryComponent,
+    output: &mut Vec<QueryPlanItem>,
+) -> Vec<Arc<str>> {
     let mut output_names: Vec<Arc<str>> = component.outputs.keys().cloned().collect();
     output_names.sort_unstable(); // to ensure deterministic project_property() ordering
 
@@ -210,6 +218,7 @@ fn outputs(component: &IRQueryComponent, output: &mut Vec<QueryPlanItem>) -> Vec
             type_name: component.vertices[&vertex_id].type_name.clone(),
             vid: vertex_id,
             field_name: context_field.field_name.clone(),
+            kind: ProjectKind::Values,
         })
     }
 
@@ -232,11 +241,11 @@ fn compute_fold(
 
                 let field_vertex = &parent_component.vertices[&field.vertex_id];
                 let type_name = field_vertex.type_name.clone();
-                output.push(QueryPlanItem::ProjectPropertyImported {
+                output.push(QueryPlanItem::ProjectProperty {
                     type_name,
                     vid: field.vertex_id,
                     field_name: field.field_name.clone(),
-                    imported_field: imported_field.clone(),
+                    kind: ProjectKind::ImportedField(imported_field.clone()),
                 });
             }
             FieldRef::FoldSpecificField(fold_specific_field) => {
@@ -269,6 +278,7 @@ fn compute_fold(
         neighbors,
         plan: compute_component(query, &fold.component),
         tags: fold.imported_tags.clone(),
+        post_fold_filters: fold.post_filters.clone(),
     });
 
     // Apply post-fold filters.
@@ -283,13 +293,12 @@ fn compute_fold(
     }
 
     let mut fold_outputs = vec![];
-    let output_names = outputs(&fold.component, &mut fold_outputs);
+    let output_names = construct_outputs(&fold.component, &mut fold_outputs);
     output.push(QueryPlanItem::FoldOutputs {
         eid: fold.eid,
         vid: expanding_from_vid,
         output_names,
         fold_specific_outputs: fold.fold_specific_outputs.clone(),
-        outputs: fold.component.outputs.clone(),
         folds: fold.component.folds.clone(),
         plan: fold_outputs,
     });
@@ -375,9 +384,8 @@ fn compute_context_field(
             type_name,
             vid: vertex_id,
             field_name: context_field.field_name.clone(),
+            kind: ProjectKind::Suspend,
         });
-
-        output.push(QueryPlanItem::PopSuspended);
     } else {
         // This context field represents an imported tag value from an outer component.
         // Grab its value from the context itself.
@@ -407,6 +415,7 @@ fn compute_local_field(
         type_name,
         vid: current_vid,
         field_name: local_field.field_name.clone(),
+        kind: ProjectKind::Values,
     });
 }
 
@@ -510,10 +519,11 @@ fn expand_recursive_edge(
 
     for _ in 2..=max_depth {
         if let Some(coerce_to) = recursive.coerce_to.as_ref() {
-            output.push(QueryPlanItem::CoerceOrSuspend {
+            output.push(QueryPlanItem::Coerce {
                 coerced_from: edge_endpoint_type.clone(),
                 coerce_to: coerce_to.clone(),
                 vid: expanding_from.vid,
+                kind: CoerceKind::Suspend,
             });
         }
 
@@ -547,52 +557,4 @@ fn perform_one_recursive_edge_expansion(
             vid: expanding_from.vid,
         },
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        collections::BTreeMap,
-        fs,
-        path::{Path, PathBuf},
-        sync::Arc,
-    };
-
-    use trustfall_filetests_macros::parameterize;
-
-    use crate::{
-        interpreter::{error::QueryArgumentsError, InterpretedQuery},
-        ir::{indexed::IndexedQuery, FieldValue},
-        util::TestIRQueryResult,
-    };
-
-    #[parameterize("trustfall_core/src/resources/test_data/execution_errors")]
-    fn parameterizable_tester(base: &Path, stem: &str) {
-        let mut input_path = PathBuf::from(base);
-        input_path.push(format!("{stem}.ir.ron"));
-
-        let mut check_path = PathBuf::from(base);
-        check_path.push(format!("{stem}.exec-error.ron"));
-        let check_data = fs::read_to_string(check_path).unwrap();
-
-        let input_data = fs::read_to_string(input_path).unwrap();
-        let test_query: TestIRQueryResult = ron::from_str(&input_data).unwrap();
-        let test_query = test_query.unwrap();
-
-        let arguments: BTreeMap<Arc<str>, FieldValue> = test_query
-            .arguments
-            .into_iter()
-            .map(|(k, v)| (Arc::from(k), v))
-            .collect();
-
-        let indexed_query: IndexedQuery = test_query.ir_query.try_into().unwrap();
-        let constructed_test_item = InterpretedQuery::from_query_and_arguments(
-            Arc::from(indexed_query),
-            Arc::from(arguments),
-        );
-
-        let check_parsed: Result<_, QueryArgumentsError> = Err(ron::from_str(&check_data).unwrap());
-
-        assert_eq!(check_parsed, constructed_test_item);
-    }
 }

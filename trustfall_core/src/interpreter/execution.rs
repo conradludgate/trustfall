@@ -1,10 +1,4 @@
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
-    fmt::Debug,
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, collections::BTreeMap, fmt::Debug, rc::Rc, sync::Arc};
 
 use regex::Regex;
 
@@ -18,14 +12,17 @@ use crate::{
         ValueOrVec,
     },
     ir::{
-        indexed::IndexedQuery, Argument, ContextField, EdgeParameters, Eid, FieldRef, FieldValue,
-        FoldSpecificFieldKind, IREdge, IRFold, IRQueryComponent, IRVertex, LocalField, Operation,
-        Recursive, Vid,
+        indexed::IndexedQuery, Argument, Eid, FieldRef, FieldValue, FoldSpecificFieldKind,
+        Operation,
     },
     util::BTreeMapTryInsertExt,
 };
 
-use super::{error::QueryArgumentsError, Adapter, DataContext, InterpretedQuery};
+use super::{
+    error::QueryArgumentsError,
+    query_plan::{query_plan, CoerceKind, ProjectKind, ProjectNeighbors, QueryPlanItem},
+    Adapter, DataContext, InterpretedQuery,
+};
 
 #[allow(clippy::type_complexity)]
 pub fn interpret_ir<'query, DataToken>(
@@ -36,237 +33,392 @@ pub fn interpret_ir<'query, DataToken>(
 where
     DataToken: Clone + Debug + 'query,
 {
+    let plan = query_plan(indexed_query.clone());
+
     let query = InterpretedQuery::from_query_and_arguments(indexed_query, arguments)?;
-    let ir_query = &query.indexed_query.ir_query;
 
-    let root_edge = &ir_query.root_name;
-    let root_edge_parameters = &ir_query.root_parameters;
+    let iter = {
+        Box::new(
+            adapter
+                .borrow_mut()
+                .get_starting_tokens(plan.edge, plan.params, query.clone(), plan.vid)
+                .map(|x| DataContext::new(Some(x))),
+        )
+    };
 
-    let mut adapter_ref = adapter.borrow_mut();
-    let mut iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> = Box::new(
-        adapter_ref
-            .get_starting_tokens(
-                root_edge.clone(),
-                root_edge_parameters.clone(),
-                query.clone(),
-                ir_query.root_component.root,
-            )
-            .map(|x| DataContext::new(Some(x))),
-    );
-    drop(adapter_ref);
+    let iter = build_plan(adapter, &query, plan.plan, iter);
 
-    let component = &ir_query.root_component;
-    iterator = compute_component(adapter.clone(), &query, component, iterator);
-
-    Ok(construct_outputs(adapter.as_ref(), &query, iterator))
-}
-
-fn coerce_if_needed<'query, DataToken>(
-    adapter: &RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>,
-    query: &InterpretedQuery,
-    vertex: &IRVertex,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>
-where
-    DataToken: Clone + Debug + 'query,
-{
-    match vertex.coerced_from_type.as_ref() {
-        None => iterator,
-        Some(coerced_from) => perform_coercion(
-            adapter,
-            query,
-            vertex,
-            coerced_from.clone(),
-            vertex.type_name.clone(),
-            iterator,
-        ),
-    }
-}
-
-fn perform_coercion<'query, DataToken>(
-    adapter: &RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>,
-    query: &InterpretedQuery,
-    vertex: &IRVertex,
-    coerced_from: Arc<str>,
-    coerce_to: Arc<str>,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>
-where
-    DataToken: Clone + Debug + 'query,
-{
-    let mut adapter_ref = adapter.borrow_mut();
-    let coercion_iter = adapter_ref.can_coerce_to_type(
-        iterator,
-        coerced_from,
-        coerce_to,
-        query.clone(),
-        vertex.vid,
-    );
-
-    Box::new(coercion_iter.filter_map(
-        |(ctx, can_coerce)| {
-            if can_coerce {
-                Some(ctx)
-            } else {
-                None
-            }
-        },
-    ))
-}
-
-fn compute_component<'query, DataToken>(
-    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
-    query: &InterpretedQuery,
-    component: &IRQueryComponent,
-    mut iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>
-where
-    DataToken: Clone + Debug + 'query,
-{
-    let component_root_vid = component.root;
-    let root_vertex = &component.vertices[&component_root_vid];
-
-    iterator = coerce_if_needed(adapter.as_ref(), query, root_vertex, iterator);
-
-    for filter_expr in &root_vertex.filters {
-        iterator = apply_local_field_filter(
-            adapter.as_ref(),
-            query,
-            component,
-            component.root,
-            filter_expr,
-            iterator,
-        );
-    }
-
-    iterator = Box::new(iterator.map(move |mut context| {
-        context.record_token(component_root_vid);
-        context
-    }));
-
-    let mut visited_vids: BTreeSet<Vid> = btreeset! {component_root_vid};
-
-    let mut edge_iter = component.edges.values();
-    let mut fold_iter = component.folds.values();
-    let mut next_edge = edge_iter.next();
-    let mut next_fold = fold_iter.next();
-    loop {
-        let (process_next_fold, process_next_edge) = match (next_fold, next_edge) {
-            (None, None) => break,
-            (None, Some(_)) | (Some(_), None) => (next_fold, next_edge),
-            (Some(fold), Some(edge)) => match fold.eid.cmp(&edge.eid) {
-                std::cmp::Ordering::Greater => (None, Some(edge)),
-                std::cmp::Ordering::Less => (Some(fold), None),
-                std::cmp::Ordering::Equal => unreachable!(),
-            },
-        };
-
-        assert!(process_next_fold.is_some() ^ process_next_edge.is_some());
-
-        if let Some(fold) = process_next_fold {
-            let from_vid_unvisited = visited_vids.insert(fold.from_vid);
-            let to_vid_unvisited = visited_vids.insert(fold.to_vid);
-            assert!(!from_vid_unvisited);
-            assert!(to_vid_unvisited);
-
-            iterator = compute_fold(
-                adapter.clone(),
-                query,
-                &component.vertices[&fold.from_vid],
-                component,
-                fold.clone(),
-                iterator,
-            );
-
-            next_fold = fold_iter.next();
-        } else if let Some(edge) = process_next_edge {
-            let from_vid_unvisited = visited_vids.insert(edge.from_vid);
-            let to_vid_unvisited = visited_vids.insert(edge.to_vid);
-            assert!(!from_vid_unvisited);
-            assert!(to_vid_unvisited);
-
-            iterator = expand_edge(
-                adapter.clone(),
-                query,
-                component,
-                edge.from_vid,
-                edge.to_vid,
-                edge,
-                iterator,
-            );
-
-            next_edge = edge_iter.next();
-        }
-    }
-
-    iterator
-}
-
-fn construct_outputs<'query, DataToken: Clone + Debug + 'query>(
-    adapter: &RefCell<impl Adapter<'query, DataToken = DataToken>>,
-    query: &InterpretedQuery,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = BTreeMap<Arc<str>, FieldValue>> + 'query> {
-    let ir_query = &query.indexed_query.ir_query;
-    let mut output_names: Vec<Arc<str>> = ir_query.root_component.outputs.keys().cloned().collect();
-    output_names.sort_unstable(); // to ensure deterministic project_property() ordering
-
-    let mut output_iterator = iterator;
-
-    for output_name in output_names.iter() {
-        let context_field = &ir_query.root_component.outputs[output_name];
-        let vertex_id = context_field.vertex_id;
-        let moved_iterator = Box::new(output_iterator.map(move |context| {
-            let new_token = context.tokens[&vertex_id].clone();
-            context.move_to_token(new_token)
-        }));
-
-        let current_type_name = &ir_query.root_component.vertices[&vertex_id].type_name;
-        let mut adapter_ref = adapter.borrow_mut();
-        let field_data_iterator = adapter_ref.project_property(
-            moved_iterator,
-            current_type_name.clone(),
-            context_field.field_name.clone(),
-            query.clone(),
-            vertex_id,
-        );
-        drop(adapter_ref);
-
-        output_iterator = Box::new(field_data_iterator.map(|(mut context, value)| {
-            context.values.push(value);
-            context
-        }));
-    }
-
-    let expected_output_names: BTreeSet<_> = query.indexed_query.outputs.keys().cloned().collect();
-
-    Box::new(output_iterator.map(move |mut context| {
-        assert!(context.values.len() == output_names.len());
-
-        let mut output: BTreeMap<Arc<str>, FieldValue> = output_names
+    let iter = Box::new(iter.map(move |mut context| {
+        let mut output: BTreeMap<Arc<str>, FieldValue> = plan
+            .outputs
             .iter()
             .cloned()
             .zip(context.values.drain(..))
             .collect();
 
         for ((_, output_name), output_value) in context.folded_values {
-            let existing = output.insert(output_name, output_value.into());
-            assert!(existing.is_none());
+            output.insert(output_name, output_value.into());
         }
 
-        debug_assert_eq!(expected_output_names, output.keys().cloned().collect());
-
         output
-    }))
+    }));
+
+    Ok(iter)
+}
+
+fn build_plan<'query, DataToken>(
+    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
+    query: &InterpretedQuery,
+    plan: Vec<QueryPlanItem>,
+    mut iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
+) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>
+where
+    DataToken: Clone + Debug + 'query,
+{
+    for plan_item in plan {
+        iterator = build_plan_item(adapter.clone(), query, plan_item, iterator);
+    }
+    iterator
+}
+
+#[allow(clippy::type_complexity)]
+fn expand_neighbors<'query, DataToken>(
+    adapter: &RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>,
+    query: &InterpretedQuery,
+    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
+    neighbors: ProjectNeighbors,
+) -> Box<
+    dyn Iterator<
+            Item = (
+                DataContext<DataToken>,
+                Box<dyn Iterator<Item = DataToken> + 'query>,
+            ),
+        > + 'query,
+>
+where
+    DataToken: Clone + Debug + 'query,
+{
+    adapter.borrow_mut().project_neighbors(
+        iterator,
+        neighbors.type_name,
+        neighbors.edge_name,
+        neighbors.parameters,
+        query.clone(),
+        neighbors.vid,
+        neighbors.eid,
+    )
+}
+
+fn build_plan_item<'query, DataToken>(
+    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
+    query: &InterpretedQuery,
+    plan_item: QueryPlanItem,
+    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
+) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>
+where
+    DataToken: Clone + Debug + 'query,
+{
+    match plan_item {
+        // misc steps
+        QueryPlanItem::Argument(name) => {
+            let right_value = query.arguments[name.as_ref()].to_owned();
+            Box::new(iterator.map(move |mut ctx| {
+                // TODO: implement more efficient filtering with:
+                //       - no clone of runtime parameter values
+                //       - omit the "tag from missing optional" check if the filter argument isn't
+                //         a tag, or if it's a tag that isn't from an optional scope relative to
+                //         the current scope
+                //       - type awareness: we know the type of the field being filtered,
+                //         and we probably know (or can infer) the type of the filtering argument(s)
+                //       - precomputation to improve efficiency: build regexes once,
+                //         turn "in_collection" filter arguments into sets if possible, etc.
+                ctx.values.push(right_value.to_owned());
+                ctx
+            }))
+        }
+        QueryPlanItem::ImportTag(field_ref) => Box::new(iterator.map(move |mut context| {
+            let value = context.imported_tags[&field_ref].clone();
+            context.values.push(value);
+
+            context
+        })),
+        QueryPlanItem::MoveTo(vid) => Box::new(iterator.map(move |context| {
+            let new_token = context.tokens[&vid].clone();
+            context.move_to_token(new_token)
+        })),
+        QueryPlanItem::Record(vid) => Box::new(iterator.map(move |mut context| {
+            context.record_token(vid);
+            context
+        })),
+        QueryPlanItem::Activate(vid) => Box::new(iterator.map(move |x| x.activate_token(&vid))),
+        QueryPlanItem::SuspendNone => Box::new(iterator.map(move |mut context| {
+            if context.current_token.is_none() {
+                // Mark that this token starts off with a None current_token value,
+                // so the later unsuspend() call should restore it to such a state later.
+                context.suspended_tokens.push(None);
+            }
+            context
+        })),
+        QueryPlanItem::PopIntoImport(field) => Box::new(iterator.map(move |mut ctx| {
+            ctx.imported_tags.insert(
+                field.clone(),
+                ctx.values
+                    .pop()
+                    .expect("fold-specific field computed and pushed onto the stack"),
+            );
+            ctx
+        })),
+        QueryPlanItem::Filter(filter) => apply_filter(query, filter, iterator),
+
+        // property
+        QueryPlanItem::ProjectProperty {
+            type_name,
+            vid,
+            field_name,
+            kind: store,
+        } => {
+            let mut a = adapter.borrow_mut();
+            let iter = a.project_property(iterator, type_name, field_name, query.clone(), vid);
+            match store {
+                ProjectKind::Values => Box::new(iter.map(|(mut context, value)| {
+                    context.values.push(value);
+                    context
+                })),
+                ProjectKind::ImportedField(imported_field) => {
+                    Box::new(iter.map(move |(mut context, value)| {
+                        context.imported_tags.insert(imported_field.clone(), value);
+                        context
+                    }))
+                }
+                ProjectKind::Suspend => Box::new(iter.map(|(mut context, value)| {
+                    context.values.push(value);
+
+                    // Make sure that the context has the same "current" token
+                    // as before evaluating the context field.
+                    let old_current_token = context.suspended_tokens.pop().unwrap();
+                    context.move_to_token(old_current_token)
+                })),
+            }
+        }
+
+        // type filter
+        QueryPlanItem::Coerce {
+            coerced_from,
+            coerce_to,
+            vid,
+            kind,
+        } => {
+            let coercion_iter = adapter.borrow_mut().can_coerce_to_type(
+                iterator,
+                coerced_from,
+                coerce_to,
+                query.clone(),
+                vid,
+            );
+            match kind {
+                CoerceKind::Filter => Box::new(
+                    coercion_iter.filter_map(|(ctx, can_coerce)| can_coerce.then_some(ctx)),
+                ),
+                CoerceKind::Suspend => Box::new(coercion_iter.map(|(ctx, can_coerce)| {
+                    if can_coerce {
+                        ctx
+                    } else {
+                        ctx.ensure_suspended()
+                    }
+                })),
+            }
+        }
+
+        // basic expand
+        QueryPlanItem::Expand {
+            optional,
+            neighbors,
+        } => Box::new(
+            expand_neighbors(&*adapter, query, iterator, neighbors).flat_map(
+                move |(context, neighbor_iterator)| {
+                    EdgeExpander::new(context, neighbor_iterator, optional)
+                },
+            ),
+        ),
+
+        // recursion
+        QueryPlanItem::Recurse { neighbors } => Box::new(
+            expand_neighbors(&*adapter, query, iterator, neighbors).flat_map(
+                move |(context, neighbor_iterator)| {
+                    RecursiveEdgeExpander::new(context, neighbor_iterator)
+                },
+            ),
+        ),
+        QueryPlanItem::RecursePostProcess => post_process_recursive_expansion(iterator),
+
+        // fold 
+        QueryPlanItem::FoldCount(fold_eid) => Box::new(iterator.map(move |mut ctx| {
+            let value = ctx.folded_contexts[&fold_eid].len();
+            ctx.values.push(FieldValue::Uint64(value as u64));
+            ctx
+        })),
+        QueryPlanItem::Fold {
+            neighbors,
+            plan,
+            tags,
+            post_fold_filters,
+        } => {
+            let eid = neighbors.eid;
+            let edge_iterator = expand_neighbors(&*adapter, query, iterator, neighbors);
+            let max_fold_size = get_max_fold_count_limit(query, &post_fold_filters);
+            let query = query.clone();
+            let folded_iterator = edge_iterator.filter_map(move |(mut context, neighbors)| {
+                let imported_tags = context.imported_tags.clone();
+
+                let neighbor_contexts = Box::new(neighbors.map(move |x| {
+                    let mut ctx = DataContext::new(Some(x));
+                    ctx.imported_tags = imported_tags.clone();
+                    ctx
+                }));
+
+                let computed_iterator =
+                    build_plan(adapter.clone(), &query, plan.clone(), neighbor_contexts);
+
+                let fold_elements = collect_fold_elements(computed_iterator, &max_fold_size)?;
+                context
+                    .folded_contexts
+                    .insert_or_error(eid, fold_elements)
+                    .unwrap();
+
+                // Remove no-longer-needed imported tags.
+                for imported_tag in &tags {
+                    context.imported_tags.remove(imported_tag).unwrap();
+                }
+
+                Some(context)
+            });
+            Box::new(folded_iterator)
+        }
+        QueryPlanItem::FoldOutputs {
+            eid,
+            vid,
+            output_names,
+            fold_specific_outputs,
+            folds,
+            plan,
+        } => {
+            let query = query.clone();
+            let iterator = iterator.map(move |mut ctx| {
+                // If the @fold is inside an @optional that doesn't exist,
+                // its outputs should be `null` rather than empty lists (the usual for empty folds).
+                // Transformed outputs should also be `null` rather than their usual transformed defaults.
+                let did_fold_root_exist = ctx.tokens[&vid].is_some();
+                let default_value = if did_fold_root_exist {
+                    Some(ValueOrVec::Vec(vec![]))
+                } else {
+                    None
+                };
+
+                let fold_elements = ctx.folded_contexts.get(&eid).unwrap();
+
+                // Add any fold-specific field outputs to the context's folded values.
+                for (output_name, fold_specific_field) in &fold_specific_outputs {
+                    let value = match fold_specific_field {
+                        FoldSpecificFieldKind::Count => {
+                            ValueOrVec::Value(FieldValue::Uint64(fold_elements.len() as u64))
+                        }
+                    };
+                    ctx.folded_values
+                        .insert_or_error(
+                            (eid, output_name.clone()),
+                            did_fold_root_exist.then_some(value),
+                        )
+                        .unwrap();
+                }
+
+                // Prepare empty vectors for all the outputs from this @fold component.
+                // If the fold-root vertex didn't exist, the default is `null` instead.
+                let mut folded_values: BTreeMap<(Eid, Arc<str>), Option<ValueOrVec>> = output_names
+                    .iter()
+                    .map(|output| ((eid, output.clone()), default_value.clone()))
+                    .collect();
+
+                // Don't bother trying to resolve property values on this @fold when it's empty.
+                // Skip the adapter project_property() calls and add the empty output values directly.
+                if fold_elements.is_empty() {
+                    // We need to make sure any outputs from any nested @fold components (recursively)
+                    // are set to empty lists.
+                    let mut queue: Vec<_> = folds.values().collect();
+                    while let Some(inner_fold) = queue.pop() {
+                        for output in inner_fold.fold_specific_outputs.keys() {
+                            folded_values
+                                .insert((inner_fold.eid, output.clone()), default_value.clone());
+                        }
+                        for output in inner_fold.component.outputs.keys() {
+                            folded_values
+                                .insert((inner_fold.eid, output.clone()), default_value.clone());
+                        }
+                        queue.extend(inner_fold.component.folds.values());
+                    }
+                } else {
+                    let output_iterator = build_plan(
+                        adapter.clone(),
+                        &query,
+                        plan.clone(),
+                        Box::new(fold_elements.clone().into_iter()),
+                    );
+
+                    for mut folded_context in output_iterator {
+                        for (key, value) in folded_context.folded_values {
+                            folded_values
+                                .entry(key)
+                                .or_insert_with(|| Some(ValueOrVec::Vec(vec![])))
+                                .as_mut()
+                                .expect("not Some")
+                                .as_mut_vec()
+                                .expect("not a Vec")
+                                .push(value.unwrap_or(ValueOrVec::Value(FieldValue::Null)));
+                        }
+
+                        // We pushed values onto folded_context.values with output names in increasing order
+                        // and we are now popping from the back. That means we're getting the highest name
+                        // first, so we should reverse our output_names iteration order.
+                        for output in output_names.iter().rev() {
+                            let value = folded_context.values.pop().unwrap();
+                            folded_values
+                                .get_mut(&(eid, output.clone()))
+                                .expect("key not present")
+                                .as_mut()
+                                .expect("value was None")
+                                .as_mut_vec()
+                                .expect("not a Vec")
+                                .push(ValueOrVec::Value(value));
+                        }
+                    }
+                };
+
+                let prior_folded_values_count = ctx.folded_values.len();
+                let new_folded_values_count = folded_values.len();
+                ctx.folded_values.extend(folded_values.into_iter());
+
+                // Ensure the merged maps had disjoint keys.
+                assert_eq!(
+                    ctx.folded_values.len(),
+                    prior_folded_values_count + new_folded_values_count
+                );
+
+                ctx
+            });
+            Box::new(iterator)
+        }
+    }
 }
 
 /// If this IRFold has a filter on the folded element count, and that filter imposes
 /// a max size that can be statically determined, return that max size so it can
 /// be used for further optimizations. Otherwise, return None.
-fn get_max_fold_count_limit(query: &InterpretedQuery, fold: &IRFold) -> Option<usize> {
+fn get_max_fold_count_limit(
+    query: &InterpretedQuery,
+    post_fold_filters: &[Operation<FoldSpecificFieldKind, Argument>],
+) -> Option<usize> {
     let mut result: Option<usize> = None;
 
-    for post_fold_filter in fold.post_filters.iter() {
+    for post_fold_filter in post_fold_filters {
         let next_limit = match post_fold_filter {
             Operation::Equals(FoldSpecificFieldKind::Count, Argument::Variable(var_ref))
             | Operation::LessThanOrEqual(
@@ -342,264 +494,6 @@ fn collect_fold_elements<'query, DataToken: Clone + Debug + 'query>(
     }
 }
 
-#[allow(unused_variables)]
-fn compute_fold<'query, DataToken: Clone + Debug + 'query>(
-    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
-    query: &InterpretedQuery,
-    expanding_from: &IRVertex,
-    parent_component: &IRQueryComponent,
-    fold: Arc<IRFold>,
-    mut iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    let mut adapter_ref = adapter.borrow_mut();
-
-    // Get any imported tag values needed inside the fold component or one of its subcomponents.
-    for imported_field in fold.imported_tags.iter() {
-        match &imported_field {
-            FieldRef::ContextField(field) => {
-                let vertex_id = field.vertex_id;
-                let activated_vertex_iterator: Box<
-                    dyn Iterator<Item = DataContext<DataToken>> + 'query,
-                > = Box::new(iterator.map(move |x| x.activate_token(&vertex_id)));
-
-                let field_vertex = &parent_component.vertices[&field.vertex_id];
-                let current_type_name = &field_vertex.type_name;
-                let context_and_value_iterator = adapter_ref.project_property(
-                    activated_vertex_iterator,
-                    current_type_name.clone(),
-                    field.field_name.clone(),
-                    query.clone(),
-                    field.vertex_id,
-                );
-
-                let cloned_field = imported_field.clone();
-                iterator = Box::new(context_and_value_iterator.map(move |(mut context, value)| {
-                    context.imported_tags.insert(cloned_field.clone(), value);
-                    context
-                }));
-            }
-            FieldRef::FoldSpecificField(fold_specific_field) => {
-                let cloned_field = imported_field.clone();
-                iterator = Box::new(
-                    compute_fold_specific_field(
-                        fold_specific_field.fold_eid,
-                        &fold_specific_field.kind,
-                        iterator,
-                    )
-                    .map(move |mut ctx| {
-                        ctx.imported_tags.insert(
-                            cloned_field.clone(),
-                            ctx.values
-                                .pop()
-                                .expect("fold-specific field computed and pushed onto the stack"),
-                        );
-                        ctx
-                    }),
-                );
-            }
-        }
-    }
-
-    // Get the initial vertices inside the folded scope.
-    let expanding_from_vid = expanding_from.vid;
-    let activated_vertex_iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> =
-        Box::new(iterator.map(move |x| x.activate_token(&expanding_from_vid)));
-    let current_type_name = &expanding_from.type_name;
-    let edge_iterator = adapter_ref.project_neighbors(
-        activated_vertex_iterator,
-        current_type_name.clone(),
-        fold.edge_name.clone(),
-        fold.parameters.clone(),
-        query.clone(),
-        expanding_from.vid,
-        fold.eid,
-    );
-    drop(adapter_ref);
-
-    // Materialize the full fold data.
-    // These values are moved into the closure.
-    let cloned_adapter = adapter.clone();
-    let cloned_query = query.clone();
-    let fold_component = fold.component.clone();
-    let fold_eid = fold.eid;
-    let max_fold_size = get_max_fold_count_limit(query, fold.as_ref());
-    let moved_fold = fold.clone();
-    let folded_iterator = edge_iterator.filter_map(move |(mut context, neighbors)| {
-        let imported_tags = context.imported_tags.clone();
-
-        let neighbor_contexts = Box::new(neighbors.map(move |x| {
-            let mut ctx = DataContext::new(Some(x));
-            ctx.imported_tags = imported_tags.clone();
-            ctx
-        }));
-
-        let computed_iterator = compute_component(
-            cloned_adapter.clone(),
-            &cloned_query,
-            &fold_component,
-            neighbor_contexts,
-        );
-
-        let fold_elements = collect_fold_elements(computed_iterator, &max_fold_size)?;
-        context
-            .folded_contexts
-            .insert_or_error(fold_eid, fold_elements)
-            .unwrap();
-
-        // Remove no-longer-needed imported tags.
-        for imported_tag in &moved_fold.imported_tags {
-            context.imported_tags.remove(imported_tag).unwrap();
-        }
-
-        Some(context)
-    });
-
-    // Apply post-fold filters.
-    let mut post_filtered_iterator: Box<dyn Iterator<Item = DataContext<DataToken>>> =
-        Box::new(folded_iterator);
-    let adapter_ref = adapter.as_ref();
-    for post_fold_filter in fold.post_filters.iter() {
-        post_filtered_iterator = apply_fold_specific_filter(
-            adapter_ref,
-            query,
-            parent_component,
-            fold.as_ref(),
-            expanding_from.vid,
-            post_fold_filter,
-            post_filtered_iterator,
-        );
-    }
-
-    // Compute the outputs from this fold.
-    let mut output_names: Vec<Arc<str>> = fold.component.outputs.keys().cloned().collect();
-    output_names.sort_unstable(); // to ensure deterministic project_property() ordering
-
-    let cloned_adapter = adapter.clone();
-    let cloned_query = query.clone();
-    let fold_component = fold.component.clone();
-    let final_iterator = post_filtered_iterator.map(move |mut ctx| {
-        // If the @fold is inside an @optional that doesn't exist,
-        // its outputs should be `null` rather than empty lists (the usual for empty folds).
-        // Transformed outputs should also be `null` rather than their usual transformed defaults.
-        let did_fold_root_exist = ctx.tokens[&expanding_from_vid].is_some();
-        let default_value = if did_fold_root_exist {
-            Some(ValueOrVec::Vec(vec![]))
-        } else {
-            None
-        };
-
-        let fold_elements = ctx.folded_contexts.get(&fold_eid).unwrap();
-
-        // Add any fold-specific field outputs to the context's folded values.
-        for (output_name, fold_specific_field) in &fold.fold_specific_outputs {
-            let value = match fold_specific_field {
-                FoldSpecificFieldKind::Count => {
-                    ValueOrVec::Value(FieldValue::Uint64(fold_elements.len() as u64))
-                }
-            };
-            ctx.folded_values
-                .insert_or_error(
-                    (fold_eid, output_name.clone()),
-                    did_fold_root_exist.then_some(value),
-                )
-                .unwrap();
-        }
-
-        // Prepare empty vectors for all the outputs from this @fold component.
-        // If the fold-root vertex didn't exist, the default is `null` instead.
-        let mut folded_values: BTreeMap<(Eid, Arc<str>), Option<ValueOrVec>> = output_names
-            .iter()
-            .map(|output| ((fold_eid, output.clone()), default_value.clone()))
-            .collect();
-
-        // Don't bother trying to resolve property values on this @fold when it's empty.
-        // Skip the adapter project_property() calls and add the empty output values directly.
-        if fold_elements.is_empty() {
-            // We need to make sure any outputs from any nested @fold components (recursively)
-            // are set to empty lists.
-            let mut queue: Vec<_> = fold_component.folds.values().collect();
-            while let Some(inner_fold) = queue.pop() {
-                for output in inner_fold.fold_specific_outputs.keys() {
-                    folded_values.insert((inner_fold.eid, output.clone()), default_value.clone());
-                }
-                for output in inner_fold.component.outputs.keys() {
-                    folded_values.insert((inner_fold.eid, output.clone()), default_value.clone());
-                }
-                queue.extend(inner_fold.component.folds.values());
-            }
-        } else {
-            // Iterate through the elements of the fold and get the values we need.
-            let mut output_iterator: Box<dyn Iterator<Item = DataContext<DataToken>>> =
-                Box::new(fold_elements.clone().into_iter());
-            for output_name in output_names.iter() {
-                let context_field = &fold.component.outputs[output_name.as_ref()];
-                let vertex_id = context_field.vertex_id;
-                let moved_iterator = Box::new(output_iterator.map(move |context| {
-                    let new_token = context.tokens[&vertex_id].clone();
-                    context.move_to_token(new_token)
-                }));
-
-                let mut adapter_ref = cloned_adapter.borrow_mut();
-                let field_data_iterator = adapter_ref.project_property(
-                    moved_iterator,
-                    fold.component.vertices[&vertex_id].type_name.clone(),
-                    context_field.field_name.clone(),
-                    cloned_query.clone(),
-                    vertex_id,
-                );
-                drop(adapter_ref);
-
-                output_iterator = Box::new(field_data_iterator.map(|(mut context, value)| {
-                    context.values.push(value);
-                    context
-                }));
-            }
-
-            for mut folded_context in output_iterator {
-                for (key, value) in folded_context.folded_values {
-                    folded_values
-                        .entry(key)
-                        .or_insert_with(|| Some(ValueOrVec::Vec(vec![])))
-                        .as_mut()
-                        .expect("not Some")
-                        .as_mut_vec()
-                        .expect("not a Vec")
-                        .push(value.unwrap_or(ValueOrVec::Value(FieldValue::Null)));
-                }
-
-                // We pushed values onto folded_context.values with output names in increasing order
-                // and we are now popping from the back. That means we're getting the highest name
-                // first, so we should reverse our output_names iteration order.
-                for output in output_names.iter().rev() {
-                    let value = folded_context.values.pop().unwrap();
-                    folded_values
-                        .get_mut(&(fold_eid, output.clone()))
-                        .expect("key not present")
-                        .as_mut()
-                        .expect("value was None")
-                        .as_mut_vec()
-                        .expect("not a Vec")
-                        .push(ValueOrVec::Value(value));
-                }
-            }
-        };
-
-        let prior_folded_values_count = ctx.folded_values.len();
-        let new_folded_values_count = folded_values.len();
-        ctx.folded_values.extend(folded_values.into_iter());
-
-        // Ensure the merged maps had disjoint keys.
-        assert_eq!(
-            ctx.folded_values.len(),
-            prior_folded_values_count + new_folded_values_count
-        );
-
-        ctx
-    });
-
-    Box::new(final_iterator)
-}
-
 /// Check whether a tagged value that is being used in a filter originates from
 /// a scope that is optional and missing, and therefore the filter should pass.
 ///
@@ -664,126 +558,16 @@ macro_rules! implement_negated_filter {
     };
 }
 
-fn apply_local_field_filter<'query, DataToken: Clone + Debug + 'query>(
-    adapter_ref: &RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>,
-    query: &InterpretedQuery,
-    component: &IRQueryComponent,
-    current_vid: Vid,
-    filter: &Operation<LocalField, Argument>,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    let local_field = filter.left();
-    let field_iterator = compute_local_field(
-        adapter_ref,
-        query,
-        component,
-        current_vid,
-        local_field,
-        iterator,
-    );
-
-    apply_filter(
-        adapter_ref,
-        query,
-        component,
-        current_vid,
-        filter,
-        field_iterator,
-    )
-}
-
-fn apply_fold_specific_filter<'query, DataToken: Clone + Debug + 'query>(
-    adapter_ref: &RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>,
-    query: &InterpretedQuery,
-    component: &IRQueryComponent,
-    fold: &IRFold,
-    current_vid: Vid,
-    filter: &Operation<FoldSpecificFieldKind, Argument>,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    let fold_specific_field = filter.left();
-    let field_iterator = compute_fold_specific_field(fold.eid, fold_specific_field, iterator);
-
-    apply_filter(
-        adapter_ref,
-        query,
-        component,
-        current_vid,
-        filter,
-        field_iterator,
-    )
-}
-
 fn apply_filter<
     'query,
     DataToken: Clone + Debug + 'query,
     LeftT: Debug + Clone + PartialEq + Eq,
 >(
-    adapter_ref: &RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>,
     query: &InterpretedQuery,
-    component: &IRQueryComponent,
-    current_vid: Vid,
-    filter: &Operation<LeftT, Argument>,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
+    filter: Operation<LeftT, Argument>,
+    expression_iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
 ) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    let expression_iterator = match filter.right() {
-        Some(Argument::Tag(FieldRef::ContextField(context_field))) => {
-            if context_field.vertex_id == current_vid {
-                // This tag is from the vertex we're currently filtering. That means the field
-                // whose value we want to get is actually local, so there's no need to compute it
-                // using the more expensive approach we use for non-local fields.
-                let local_equivalent_field = LocalField {
-                    field_name: context_field.field_name.clone(),
-                    field_type: context_field.field_type.clone(),
-                };
-                compute_local_field(
-                    adapter_ref,
-                    query,
-                    component,
-                    current_vid,
-                    &local_equivalent_field,
-                    iterator,
-                )
-            } else {
-                compute_context_field(adapter_ref, query, component, context_field, iterator)
-            }
-        }
-        Some(Argument::Tag(field_ref @ FieldRef::FoldSpecificField(fold_field))) => {
-            if component.folds.contains_key(&fold_field.fold_eid) {
-                // This value comes from one of this component's folds:
-                // the @tag is a sibling to the current computation and needs to be materialized.
-                compute_fold_specific_field(fold_field.fold_eid, &fold_field.kind, iterator)
-            } else {
-                // This value represents an imported tag value from an outer component.
-                // Grab its value from the context itself.
-                let cloned_ref = field_ref.clone();
-                Box::new(iterator.map(move |mut ctx| {
-                    let right_value = ctx.imported_tags[&cloned_ref].clone();
-                    ctx.values.push(right_value);
-                    ctx
-                }))
-            }
-        }
-        Some(Argument::Variable(var)) => {
-            let right_value = query.arguments[var.variable_name.as_ref()].to_owned();
-            Box::new(iterator.map(move |mut ctx| {
-                // TODO: implement more efficient filtering with:
-                //       - no clone of runtime parameter values
-                //       - omit the "tag from missing optional" check if the filter argument isn't
-                //         a tag, or if it's a tag that isn't from an optional scope relative to
-                //         the current scope
-                //       - type awareness: we know the type of the field being filtered,
-                //         and we probably know (or can infer) the type of the filtering argument(s)
-                //       - precomputation to improve efficiency: build regexes once,
-                //         turn "in_collection" filter arguments into sets if possible, etc.
-                ctx.values.push(right_value.to_owned());
-                ctx
-            }))
-        }
-        None => iterator,
-    };
-
-    match filter.clone() {
+    match filter {
         Operation::IsNull(_) => {
             let output_iter = expression_iterator.filter_map(move |mut context| {
                 let last_value = context.values.pop().unwrap();
@@ -894,95 +678,6 @@ fn apply_filter<
         },
     }
 }
-
-fn compute_context_field<'query, DataToken: Clone + Debug + 'query>(
-    adapter: &RefCell<impl Adapter<'query, DataToken = DataToken>>,
-    query: &InterpretedQuery,
-    component: &IRQueryComponent,
-    context_field: &ContextField,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    let vertex_id = context_field.vertex_id;
-
-    if let Some(vertex) = component.vertices.get(&vertex_id) {
-        let moved_iterator = iterator.map(move |mut context| {
-            let current_token = context.current_token.clone();
-            let new_token = context.tokens[&vertex_id].clone();
-            context.suspended_tokens.push(current_token);
-            context.move_to_token(new_token)
-        });
-
-        let current_type_name = &vertex.type_name;
-        let mut adapter_ref = adapter.borrow_mut();
-        let context_and_value_iterator = adapter_ref.project_property(
-            Box::new(moved_iterator),
-            current_type_name.clone(),
-            context_field.field_name.clone(),
-            query.clone(),
-            vertex_id,
-        );
-        drop(adapter_ref);
-
-        Box::new(context_and_value_iterator.map(|(mut context, value)| {
-            context.values.push(value);
-
-            // Make sure that the context has the same "current" token
-            // as before evaluating the context field.
-            let old_current_token = context.suspended_tokens.pop().unwrap();
-            context.move_to_token(old_current_token)
-        }))
-    } else {
-        // This context field represents an imported tag value from an outer component.
-        // Grab its value from the context itself.
-        let field_ref = FieldRef::ContextField(context_field.clone());
-        Box::new(iterator.map(move |mut context| {
-            let value = context.imported_tags[&field_ref].clone();
-            context.values.push(value);
-
-            context
-        }))
-    }
-}
-
-fn compute_fold_specific_field<'query, DataToken: Clone + Debug + 'query>(
-    fold_eid: Eid,
-    fold_specific_field: &FoldSpecificFieldKind,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    match fold_specific_field {
-        FoldSpecificFieldKind::Count => Box::new(iterator.map(move |mut ctx| {
-            let value = ctx.folded_contexts[&fold_eid].len();
-            ctx.values.push(FieldValue::Uint64(value as u64));
-            ctx
-        })),
-    }
-}
-
-fn compute_local_field<'query, DataToken: Clone + Debug + 'query>(
-    adapter: &RefCell<impl Adapter<'query, DataToken = DataToken>>,
-    query: &InterpretedQuery,
-    component: &IRQueryComponent,
-    current_vid: Vid,
-    local_field: &LocalField,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    let current_type_name = &component.vertices[&current_vid].type_name;
-    let mut adapter_ref = adapter.borrow_mut();
-    let context_and_value_iterator = adapter_ref.project_property(
-        iterator,
-        current_type_name.clone(),
-        local_field.field_name.clone(),
-        query.clone(),
-        current_vid,
-    );
-    drop(adapter_ref);
-
-    Box::new(context_and_value_iterator.map(|(mut context, value)| {
-        context.values.push(value);
-        context
-    }))
-}
-
 struct EdgeExpander<'query, DataToken: Clone + Debug + 'query> {
     context: DataContext<DataToken>,
     neighbor_tokens: Box<dyn Iterator<Item = DataToken> + 'query>,
@@ -1049,233 +744,6 @@ impl<'query, DataToken: Clone + Debug + 'query> Iterator for EdgeExpander<'query
             None
         }
     }
-}
-
-fn expand_edge<'query, DataToken: Clone + Debug + 'query>(
-    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
-    query: &InterpretedQuery,
-    component: &IRQueryComponent,
-    expanding_from_vid: Vid,
-    expanding_to_vid: Vid,
-    edge: &IREdge,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    let expanded_iterator = if let Some(recursive) = &edge.recursive {
-        expand_recursive_edge(
-            adapter.clone(),
-            query,
-            component,
-            &component.vertices[&expanding_from_vid],
-            &component.vertices[&expanding_to_vid],
-            edge.eid,
-            &edge.edge_name,
-            &edge.parameters,
-            recursive,
-            iterator,
-        )
-    } else {
-        expand_non_recursive_edge(
-            adapter.clone(),
-            query,
-            component,
-            &component.vertices[&expanding_from_vid],
-            &component.vertices[&expanding_to_vid],
-            edge.eid,
-            &edge.edge_name,
-            &edge.parameters,
-            edge.optional,
-            iterator,
-        )
-    };
-
-    perform_entry_into_new_vertex(
-        adapter,
-        query,
-        component,
-        &component.vertices[&expanding_to_vid],
-        expanded_iterator,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn expand_non_recursive_edge<'query, DataToken: Clone + Debug + 'query>(
-    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
-    query: &InterpretedQuery,
-    _component: &IRQueryComponent,
-    expanding_from: &IRVertex,
-    _expanding_to: &IRVertex,
-    edge_id: Eid,
-    edge_name: &Arc<str>,
-    edge_parameters: &Option<Arc<EdgeParameters>>,
-    is_optional: bool,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    let expanding_from_vid = expanding_from.vid;
-    let expanding_vertex_iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> =
-        Box::new(iterator.map(move |x| x.activate_token(&expanding_from_vid)));
-
-    let current_type_name = &expanding_from.type_name;
-    let mut adapter_ref = adapter.borrow_mut();
-    let edge_iterator = adapter_ref.project_neighbors(
-        expanding_vertex_iterator,
-        current_type_name.clone(),
-        edge_name.clone(),
-        edge_parameters.clone(),
-        query.clone(),
-        expanding_from.vid,
-        edge_id,
-    );
-    drop(adapter_ref);
-
-    Box::new(edge_iterator.flat_map(move |(context, neighbor_iterator)| {
-        EdgeExpander::new(context, neighbor_iterator, is_optional)
-    }))
-}
-
-/// Apply all the operations needed at entry into a new vertex:
-/// - coerce the type, if needed
-/// - apply all local filters
-/// - record the token at this Vid in the context
-fn perform_entry_into_new_vertex<'query, DataToken: Clone + Debug + 'query>(
-    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
-    query: &InterpretedQuery,
-    component: &IRQueryComponent,
-    vertex: &IRVertex,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    let vertex_id = vertex.vid;
-    let mut iterator = coerce_if_needed(adapter.as_ref(), query, vertex, iterator);
-    for filter_expr in vertex.filters.iter() {
-        iterator = apply_local_field_filter(
-            adapter.as_ref(),
-            query,
-            component,
-            vertex_id,
-            filter_expr,
-            iterator,
-        );
-    }
-    Box::new(iterator.map(move |mut x| {
-        x.record_token(vertex_id);
-        x
-    }))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn expand_recursive_edge<'query, DataToken: Clone + Debug + 'query>(
-    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
-    query: &InterpretedQuery,
-    component: &IRQueryComponent,
-    expanding_from: &IRVertex,
-    expanding_to: &IRVertex,
-    edge_id: Eid,
-    edge_name: &Arc<str>,
-    edge_parameters: &Option<Arc<EdgeParameters>>,
-    recursive: &Recursive,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    let expanding_from_vid = expanding_from.vid;
-    let mut recursion_iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> =
-        Box::new(iterator.map(move |mut context| {
-            if context.current_token.is_none() {
-                // Mark that this token starts off with a None current_token value,
-                // so the later unsuspend() call should restore it to such a state later.
-                context.suspended_tokens.push(None);
-            }
-            context.activate_token(&expanding_from_vid)
-        }));
-
-    let max_depth = usize::from(recursive.depth);
-    recursion_iterator = perform_one_recursive_edge_expansion(
-        adapter.clone(),
-        query,
-        component,
-        expanding_from.type_name.clone(),
-        expanding_from,
-        expanding_to,
-        edge_id,
-        edge_name,
-        edge_parameters,
-        recursion_iterator,
-    );
-
-    let edge_endpoint_type = expanding_to
-        .coerced_from_type
-        .as_ref()
-        .unwrap_or(&expanding_to.type_name);
-    let recursing_from = recursive.coerce_to.as_ref().unwrap_or(edge_endpoint_type);
-
-    for _ in 2..=max_depth {
-        if let Some(coerce_to) = recursive.coerce_to.as_ref() {
-            let mut adapter_ref = adapter.borrow_mut();
-            let coercion_iter = adapter_ref.can_coerce_to_type(
-                recursion_iterator,
-                edge_endpoint_type.clone(),
-                coerce_to.clone(),
-                query.clone(),
-                expanding_from_vid,
-            );
-
-            // This coercion is unusual since it doesn't discard elements that can't be coerced.
-            // This is because we still want to produce those elements, and we simply want to
-            // not continue recursing deeper through them since they don't have the edge we need.
-            recursion_iterator = Box::new(coercion_iter.map(|(ctx, can_coerce)| {
-                if can_coerce {
-                    ctx
-                } else {
-                    ctx.ensure_suspended()
-                }
-            }));
-        }
-
-        recursion_iterator = perform_one_recursive_edge_expansion(
-            adapter.clone(),
-            query,
-            component,
-            recursing_from.clone(),
-            expanding_from,
-            expanding_to,
-            edge_id,
-            edge_name,
-            edge_parameters,
-            recursion_iterator,
-        );
-    }
-
-    post_process_recursive_expansion(recursion_iterator)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn perform_one_recursive_edge_expansion<'query, DataToken: Clone + Debug + 'query>(
-    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
-    query: &InterpretedQuery,
-    _component: &IRQueryComponent,
-    expanding_from_type: Arc<str>,
-    expanding_from: &IRVertex,
-    _expanding_to: &IRVertex,
-    edge_id: Eid,
-    edge_name: &Arc<str>,
-    edge_parameters: &Option<Arc<EdgeParameters>>,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    let mut adapter_ref = adapter.borrow_mut();
-    let edge_iterator = adapter_ref.project_neighbors(
-        iterator,
-        expanding_from_type,
-        edge_name.clone(),
-        edge_parameters.clone(),
-        query.clone(),
-        expanding_from.vid,
-        edge_id,
-    );
-    drop(adapter_ref);
-
-    let result_iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> =
-        Box::new(edge_iterator.flat_map(move |(context, neighbor_iterator)| {
-            RecursiveEdgeExpander::new(context, neighbor_iterator)
-        }));
-
-    result_iterator
 }
 
 struct RecursiveEdgeExpander<'query, DataToken: Clone + Debug + 'query> {
