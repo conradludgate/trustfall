@@ -19,15 +19,6 @@ pub struct QueryPlan {
     pub outputs: Vec<Arc<str>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ProjectNeighbors {
-    pub type_name: Arc<str>,
-    pub edge_name: Arc<str>,
-    pub parameters: Option<Arc<EdgeParameters>>,
-    pub eid: Eid,
-    pub vid: Vid,
-}
-
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ProjectKind {
@@ -45,22 +36,28 @@ pub enum CoerceKind {
     Suspend,
 }
 
-
 #[non_exhaustive]
 #[derive(Debug, Clone)]
-pub enum QueryPlanItem {
+pub enum ExpandKind {
+    Normal {
+        is_optional: bool,
+    },
+    Recursive,
     Fold {
-        neighbors: ProjectNeighbors,
         plan: Vec<QueryPlanItem>,
         tags: Vec<FieldRef>,
         post_fold_filters: Vec<Operation<FoldSpecificFieldKind, Argument>>,
     },
-    Recurse {
-        neighbors: ProjectNeighbors,
-    },
-    Expand {
-        optional: bool,
-        neighbors: ProjectNeighbors,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum QueryPlanItem {
+    ProjectProperty {
+        type_name: Arc<str>,
+        vid: Vid,
+        field_name: Arc<str>,
+        kind: ProjectKind,
     },
     Coerce {
         coerced_from: Arc<str>,
@@ -68,11 +65,13 @@ pub enum QueryPlanItem {
         vid: Vid,
         kind: CoerceKind,
     },
-    ProjectProperty {
+    Expand {
         type_name: Arc<str>,
+        edge_name: Arc<str>,
+        parameters: Option<Arc<EdgeParameters>>,
+        eid: Eid,
         vid: Vid,
-        field_name: Arc<str>,
-        kind: ProjectKind,
+        kind: ExpandKind,
     },
     Argument(Arc<str>),
     ImportTag(FieldRef),
@@ -135,7 +134,7 @@ fn perform_coercion(
         coerced_from,
         coerce_to,
         vid: vertex.vid,
-        kind: CoerceKind::Filter
+        kind: CoerceKind::Filter,
     });
 }
 
@@ -266,19 +265,18 @@ fn compute_fold(
     output.push(QueryPlanItem::Activate(expanding_from_vid));
 
     let type_name = expanding_from.type_name.clone();
-    let neighbors = ProjectNeighbors {
+
+    output.push(QueryPlanItem::Expand {
         type_name,
         edge_name: fold.edge_name.clone(),
         parameters: fold.parameters.clone(),
         vid: expanding_from.vid,
         eid: fold.eid,
-    };
-
-    output.push(QueryPlanItem::Fold {
-        neighbors,
-        plan: compute_component(query, &fold.component),
-        tags: fold.imported_tags.clone(),
-        post_fold_filters: fold.post_filters.clone(),
+        kind: ExpandKind::Fold {
+            plan: compute_component(query, &fold.component),
+            tags: fold.imported_tags.clone(),
+            post_fold_filters: fold.post_filters.clone(),
+        },
     });
 
     // Apply post-fold filters.
@@ -461,14 +459,12 @@ fn expand_non_recursive_edge(
     output.push(QueryPlanItem::Activate(expanding_from.vid));
 
     output.push(QueryPlanItem::Expand {
-        optional: is_optional,
-        neighbors: ProjectNeighbors {
-            type_name: expanding_from.type_name.clone(),
-            edge_name: edge_name.clone(),
-            parameters: edge_parameters.clone(),
-            eid: edge_id,
-            vid: expanding_from.vid,
-        },
+        type_name: expanding_from.type_name.clone(),
+        edge_name: edge_name.clone(),
+        parameters: edge_parameters.clone(),
+        eid: edge_id,
+        vid: expanding_from.vid,
+        kind: ExpandKind::Normal { is_optional },
     });
 }
 
@@ -548,13 +544,12 @@ fn perform_one_recursive_edge_expansion(
     edge_parameters: &Option<Arc<EdgeParameters>>,
     output: &mut Vec<QueryPlanItem>,
 ) {
-    output.push(QueryPlanItem::Recurse {
-        neighbors: ProjectNeighbors {
-            type_name: expanding_from_type,
-            edge_name: edge_name.clone(),
-            parameters: edge_parameters.clone(),
-            eid: edge_id,
-            vid: expanding_from.vid,
-        },
+    output.push(QueryPlanItem::Expand {
+        type_name: expanding_from_type,
+        edge_name: edge_name.clone(),
+        parameters: edge_parameters.clone(),
+        eid: edge_id,
+        vid: expanding_from.vid,
+        kind: ExpandKind::Recursive,
     });
 }

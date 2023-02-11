@@ -20,7 +20,7 @@ use crate::{
 
 use super::{
     error::QueryArgumentsError,
-    query_plan::{query_plan, CoerceKind, ProjectKind, ProjectNeighbors, QueryPlanItem},
+    query_plan::{query_plan, CoerceKind, ExpandKind, ProjectKind, QueryPlanItem},
     Adapter, DataContext, InterpretedQuery,
 };
 
@@ -81,33 +81,7 @@ where
     iterator
 }
 
-#[allow(clippy::type_complexity)]
-fn expand_neighbors<'query, DataToken>(
-    adapter: &RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>,
-    query: &InterpretedQuery,
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-    neighbors: ProjectNeighbors,
-) -> Box<
-    dyn Iterator<
-            Item = (
-                DataContext<DataToken>,
-                Box<dyn Iterator<Item = DataToken> + 'query>,
-            ),
-        > + 'query,
->
-where
-    DataToken: Clone + Debug + 'query,
-{
-    adapter.borrow_mut().project_neighbors(
-        iterator,
-        neighbors.type_name,
-        neighbors.edge_name,
-        neighbors.parameters,
-        query.clone(),
-        neighbors.vid,
-        neighbors.eid,
-    )
-}
+type Iter<'query, Item> = Box<dyn Iterator<Item = Item> + 'query>;
 
 fn build_plan_item<'query, DataToken>(
     adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
@@ -231,69 +205,36 @@ where
 
         // basic expand
         QueryPlanItem::Expand {
-            optional,
-            neighbors,
-        } => Box::new(
-            expand_neighbors(&*adapter, query, iterator, neighbors).flat_map(
-                move |(context, neighbor_iterator)| {
-                    EdgeExpander::new(context, neighbor_iterator, optional)
-                },
-            ),
-        ),
+            type_name,
+            edge_name,
+            parameters,
+            eid,
+            vid,
+            kind,
+        } => {
+            let iter = {
+                adapter.borrow_mut().project_neighbors(
+                    iterator,
+                    type_name,
+                    edge_name,
+                    parameters,
+                    query.clone(),
+                    vid,
+                    eid,
+                )
+            };
+            expand_neighbors(adapter, query, kind, eid, iter)
+        }
 
         // recursion
-        QueryPlanItem::Recurse { neighbors } => Box::new(
-            expand_neighbors(&*adapter, query, iterator, neighbors).flat_map(
-                move |(context, neighbor_iterator)| {
-                    RecursiveEdgeExpander::new(context, neighbor_iterator)
-                },
-            ),
-        ),
         QueryPlanItem::RecursePostProcess => post_process_recursive_expansion(iterator),
 
-        // fold 
+        // fold
         QueryPlanItem::FoldCount(fold_eid) => Box::new(iterator.map(move |mut ctx| {
             let value = ctx.folded_contexts[&fold_eid].len();
             ctx.values.push(FieldValue::Uint64(value as u64));
             ctx
         })),
-        QueryPlanItem::Fold {
-            neighbors,
-            plan,
-            tags,
-            post_fold_filters,
-        } => {
-            let eid = neighbors.eid;
-            let edge_iterator = expand_neighbors(&*adapter, query, iterator, neighbors);
-            let max_fold_size = get_max_fold_count_limit(query, &post_fold_filters);
-            let query = query.clone();
-            let folded_iterator = edge_iterator.filter_map(move |(mut context, neighbors)| {
-                let imported_tags = context.imported_tags.clone();
-
-                let neighbor_contexts = Box::new(neighbors.map(move |x| {
-                    let mut ctx = DataContext::new(Some(x));
-                    ctx.imported_tags = imported_tags.clone();
-                    ctx
-                }));
-
-                let computed_iterator =
-                    build_plan(adapter.clone(), &query, plan.clone(), neighbor_contexts);
-
-                let fold_elements = collect_fold_elements(computed_iterator, &max_fold_size)?;
-                context
-                    .folded_contexts
-                    .insert_or_error(eid, fold_elements)
-                    .unwrap();
-
-                // Remove no-longer-needed imported tags.
-                for imported_tag in &tags {
-                    context.imported_tags.remove(imported_tag).unwrap();
-                }
-
-                Some(context)
-            });
-            Box::new(folded_iterator)
-        }
         QueryPlanItem::FoldOutputs {
             eid,
             vid,
@@ -409,6 +350,63 @@ where
     }
 }
 
+fn expand_neighbors<'query, DataToken>(
+    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
+    query: &InterpretedQuery,
+    kind: ExpandKind,
+    eid: Eid,
+    expand_iterator: Iter<'query, (DataContext<DataToken>, Iter<'query, DataToken>)>,
+) -> Iter<'query, DataContext<DataToken>>
+where
+    DataToken: Clone + Debug + 'query,
+{
+    match kind {
+        ExpandKind::Normal { is_optional } => Box::new(expand_iterator.flat_map(
+            move |(context, neighbor_iterator)| {
+                EdgeExpander::new(context, neighbor_iterator, is_optional)
+            },
+        )),
+        ExpandKind::Recursive => Box::new(expand_iterator.flat_map(
+            move |(context, neighbor_iterator)| {
+                RecursiveEdgeExpander::new(context, neighbor_iterator)
+            },
+        )),
+        ExpandKind::Fold {
+            plan,
+            tags,
+            post_fold_filters,
+        } => {
+            let max_fold_size = get_max_fold_count_limit(query, &post_fold_filters);
+            let query = query.clone();
+            let folded_iterator = expand_iterator.filter_map(move |(mut context, neighbors)| {
+                let imported_tags = context.imported_tags.clone();
+
+                let neighbor_contexts = Box::new(neighbors.map(move |x| {
+                    let mut ctx = DataContext::new(Some(x));
+                    ctx.imported_tags = imported_tags.clone();
+                    ctx
+                }));
+
+                let computed_iterator =
+                    build_plan(adapter.clone(), &query, plan.clone(), neighbor_contexts);
+
+                let fold_elements = collect_fold_elements(computed_iterator, &max_fold_size)?;
+                context
+                    .folded_contexts
+                    .insert_or_error(eid, fold_elements)
+                    .unwrap();
+
+                // Remove no-longer-needed imported tags.
+                for imported_tag in &tags {
+                    context.imported_tags.remove(imported_tag).unwrap();
+                }
+
+                Some(context)
+            });
+            Box::new(folded_iterator)
+        }
+    }
+}
 /// If this IRFold has a filter on the folded element count, and that filter imposes
 /// a max size that can be statically determined, return that max size so it can
 /// be used for further optimizations. Otherwise, return None.
