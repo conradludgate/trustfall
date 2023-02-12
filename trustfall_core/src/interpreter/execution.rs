@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::BTreeMap, fmt::Debug, rc::Rc, sync::Arc};
+use std::{collections::BTreeMap, fmt::Debug, rc::Rc, sync::Arc};
 
 use regex::Regex;
 
@@ -26,7 +26,7 @@ use super::{
 
 #[allow(clippy::type_complexity)]
 pub fn interpret_ir<'query, DataToken>(
-    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
+    adapter: Rc<impl Adapter<'query, DataToken = DataToken> + 'query>,
     indexed_query: Arc<IndexedQuery>,
     arguments: Arc<BTreeMap<Arc<str>, FieldValue>>,
 ) -> Result<Box<dyn Iterator<Item = BTreeMap<Arc<str>, FieldValue>> + 'query>, QueryArgumentsError>
@@ -40,7 +40,6 @@ where
     let iter = {
         Box::new(
             adapter
-                .borrow_mut()
                 .get_starting_tokens(plan.edge, plan.params, query.clone(), plan.vid)
                 .map(|x| DataContext::new(Some(x))),
         )
@@ -67,7 +66,7 @@ where
 }
 
 fn build_plan<'query, DataToken>(
-    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
+    adapter: Rc<impl Adapter<'query, DataToken = DataToken> + 'query>,
     query: &InterpretedQuery,
     plan: Vec<QueryPlanItem>,
     mut iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
@@ -84,7 +83,7 @@ where
 type Iter<'query, Item> = Box<dyn Iterator<Item = Item> + 'query>;
 
 fn build_plan_item<'query, DataToken>(
-    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
+    adapter: Rc<impl Adapter<'query, DataToken = DataToken> + 'query>,
     query: &InterpretedQuery,
     plan_item: QueryPlanItem,
     iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
@@ -151,7 +150,7 @@ where
             field_name,
             kind: store,
         } => {
-            let mut a = adapter.borrow_mut();
+            let a = adapter;
             let iter = a.project_property(iterator, type_name, field_name, query.clone(), vid);
             match store {
                 ProjectKind::Values => Box::new(iter.map(|(mut context, value)| {
@@ -182,13 +181,8 @@ where
             vid,
             kind,
         } => {
-            let coercion_iter = adapter.borrow_mut().can_coerce_to_type(
-                iterator,
-                coerced_from,
-                coerce_to,
-                query.clone(),
-                vid,
-            );
+            let coercion_iter =
+                adapter.can_coerce_to_type(iterator, coerced_from, coerce_to, query.clone(), vid);
             match kind {
                 CoerceKind::Filter => Box::new(
                     coercion_iter.filter_map(|(ctx, can_coerce)| can_coerce.then_some(ctx)),
@@ -203,7 +197,7 @@ where
             }
         }
 
-        // basic expand
+        // expand
         QueryPlanItem::Expand {
             type_name,
             edge_name,
@@ -213,7 +207,7 @@ where
             kind,
         } => {
             let iter = {
-                adapter.borrow_mut().project_neighbors(
+                adapter.project_neighbors(
                     iterator,
                     type_name,
                     edge_name,
@@ -249,11 +243,7 @@ where
                 // its outputs should be `null` rather than empty lists (the usual for empty folds).
                 // Transformed outputs should also be `null` rather than their usual transformed defaults.
                 let did_fold_root_exist = ctx.tokens[&vid].is_some();
-                let default_value = if did_fold_root_exist {
-                    Some(ValueOrVec::Vec(vec![]))
-                } else {
-                    None
-                };
+                let default_value = did_fold_root_exist.then_some(ValueOrVec::Vec(Vec::new()));
 
                 let fold_elements = ctx.folded_contexts.get(&eid).unwrap();
 
@@ -333,16 +323,7 @@ where
                     }
                 };
 
-                let prior_folded_values_count = ctx.folded_values.len();
-                let new_folded_values_count = folded_values.len();
-                ctx.folded_values.extend(folded_values.into_iter());
-
-                // Ensure the merged maps had disjoint keys.
-                assert_eq!(
-                    ctx.folded_values.len(),
-                    prior_folded_values_count + new_folded_values_count
-                );
-
+                ctx.folded_values.extend(folded_values);
                 ctx
             });
             Box::new(iterator)
@@ -351,7 +332,7 @@ where
 }
 
 fn expand_neighbors<'query, DataToken>(
-    adapter: Rc<RefCell<impl Adapter<'query, DataToken = DataToken> + 'query>>,
+    adapter: Rc<impl Adapter<'query, DataToken = DataToken> + 'query>,
     query: &InterpretedQuery,
     kind: ExpandKind,
     eid: Eid,

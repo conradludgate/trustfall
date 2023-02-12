@@ -198,7 +198,7 @@ where
         }
     }
 
-    pub fn finish(self) -> Trace<DataToken> {
+    pub fn finish(&self) -> Trace<DataToken> {
         // Ensure nothing is reading the trace i.e. we can safely stop interpreting.
         let trace_ref = self.tracer.borrow_mut();
         let new_trace = Trace::new(trace_ref.ir_query.clone(), trace_ref.arguments.clone());
@@ -209,7 +209,7 @@ where
 
 #[allow(dead_code)]
 pub(crate) fn tap_results<'token, DataToken, AdapterT>(
-    adapter_tap: Rc<RefCell<AdapterTap<'token, DataToken, AdapterT>>>,
+    adapter_tap: Rc<AdapterTap<'token, DataToken, AdapterT>>,
     result_iter: impl Iterator<Item = BTreeMap<Arc<str>, FieldValue>> + 'token,
 ) -> impl Iterator<Item = BTreeMap<Arc<str>, FieldValue>> + 'token
 where
@@ -218,8 +218,7 @@ where
     for<'de2> DataToken: Deserialize<'de2>,
 {
     result_iter.map(move |result| {
-        let adapter_ref = adapter_tap.borrow_mut();
-        adapter_ref
+        adapter_tap
             .tracer
             .borrow_mut()
             .record(TraceOpContent::ProduceQueryResult(result.clone()), None);
@@ -237,7 +236,7 @@ where
     type DataToken = DataToken;
 
     fn get_starting_tokens(
-        &mut self,
+        &self,
         edge_name: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
         query_hint: InterpretedQuery,
@@ -273,7 +272,7 @@ where
     }
 
     fn project_property(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
@@ -346,7 +345,7 @@ where
 
     #[allow(clippy::type_complexity)]
     fn project_neighbors(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
@@ -450,7 +449,7 @@ where
     }
 
     fn can_coerce_to_type(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,

@@ -18,7 +18,7 @@ impl Adapter<'static> for NullablesAdapter {
     type DataToken = NullablesToken;
 
     fn get_starting_tokens(
-        &mut self,
+        &self,
         edge: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
         query_hint: InterpretedQuery,
@@ -28,7 +28,7 @@ impl Adapter<'static> for NullablesAdapter {
     }
 
     fn project_property(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
@@ -40,7 +40,7 @@ impl Adapter<'static> for NullablesAdapter {
 
     #[allow(clippy::type_complexity)]
     fn project_neighbors(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
@@ -60,7 +60,7 @@ impl Adapter<'static> for NullablesAdapter {
     }
 
     fn can_coerce_to_type(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::{cell::RefCell, fs};
 
 use serde::Deserialize;
 use trustfall_core::ir::TransparentValue;
@@ -34,7 +34,7 @@ fn execute_query(path: &str) {
     let content = fs::read_to_string(path).unwrap();
     let input_query: InputQuery = ron::from_str(&content).unwrap();
 
-    let adapter = Rc::new(RefCell::new(HackerNewsAdapter));
+    let adapter = Rc::new(HackerNewsAdapter);
 
     let query = parse(&SCHEMA, input_query.query).unwrap();
     let arguments = input_query.args;

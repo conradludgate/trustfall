@@ -32,7 +32,7 @@ impl<'a> Adapter<'a> for FeedAdapter<'a> {
     type DataToken = Token<'a>;
 
     fn get_starting_tokens(
-        &mut self,
+        &self,
         edge: Arc<str>,
         _parameters: Option<Arc<EdgeParameters>>,
         _query_hint: InterpretedQuery,
@@ -48,7 +48,7 @@ impl<'a> Adapter<'a> for FeedAdapter<'a> {
     }
 
     fn project_property(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'a>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
@@ -127,7 +127,7 @@ impl<'a> Adapter<'a> for FeedAdapter<'a> {
 
     #[allow(clippy::type_complexity)]
     fn project_neighbors(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'a>,
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
@@ -174,7 +174,7 @@ impl<'a> Adapter<'a> for FeedAdapter<'a> {
     }
 
     fn can_coerce_to_type(
-        &mut self,
+        &self,
         _data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'a>,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,

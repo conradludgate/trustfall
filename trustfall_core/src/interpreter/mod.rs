@@ -19,9 +19,9 @@ pub mod error;
 pub mod execution;
 mod filtering;
 pub mod macros;
+pub mod query_plan;
 pub mod replay;
 pub mod trace;
-pub mod query_plan;
 
 #[derive(Debug, Clone)]
 pub struct DataContext<DataToken: Clone + Debug> {
@@ -348,53 +348,50 @@ fn validate_argument_type(
     }
 }
 
+type Iter<'token, Item> = Box<dyn Iterator<Item = Item> + 'token>;
+
 pub trait Adapter<'token> {
     type DataToken: Clone + Debug + 'token;
 
     fn get_starting_tokens(
-        &mut self,
+        &self,
         edge: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
         query_hint: InterpretedQuery,
         vertex_hint: Vid,
     ) -> Box<dyn Iterator<Item = Self::DataToken> + 'token>;
 
-    #[allow(clippy::type_complexity)]
+    /// Properties are one to one mappings between a type and it's field contents.
     fn project_property(
-        &mut self,
-        data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
+        &self,
+        data_contexts: Iter<'token, DataContext<Self::DataToken>>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
         query_hint: InterpretedQuery,
         vertex_hint: Vid,
-    ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, FieldValue)> + 'token>;
+    ) -> Iter<'token, (DataContext<Self::DataToken>, FieldValue)>;
 
-    #[allow(clippy::type_complexity)]
+    /// Neighbors are one to many mappings between a type and another type, following the edge
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     fn project_neighbors(
-        &mut self,
-        data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
+        &self,
+        data_contexts: Iter<'token, DataContext<Self::DataToken>>,
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
         query_hint: InterpretedQuery,
         vertex_hint: Vid,
         edge_hint: Eid,
-    ) -> Box<
-        dyn Iterator<
-                Item = (
-                    DataContext<Self::DataToken>,
-                    Box<dyn Iterator<Item = Self::DataToken> + 'token>,
-                ),
-            > + 'token,
-    >;
+    ) -> Iter<'token, (DataContext<Self::DataToken>, Iter<'token, Self::DataToken>)>;
 
+    /// Maps whether the current value can coerce into the desired type
     fn can_coerce_to_type(
-        &mut self,
-        data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
+        &self,
+        data_contexts: Iter<'token, DataContext<Self::DataToken>>,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,
         query_hint: InterpretedQuery,
         vertex_hint: Vid,
-    ) -> Box<dyn Iterator<Item = (DataContext<Self::DataToken>, bool)> + 'token>;
+    ) -> Iter<'token, (DataContext<Self::DataToken>, bool)>;
 }

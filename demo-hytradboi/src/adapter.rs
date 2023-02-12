@@ -192,7 +192,7 @@ impl Adapter<'static> for DemoAdapter {
     type DataToken = Token;
 
     fn get_starting_tokens(
-        &mut self,
+        &self,
         edge: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
         _query_hint: InterpretedQuery,
@@ -228,7 +228,7 @@ impl Adapter<'static> for DemoAdapter {
     }
 
     fn project_property(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
@@ -367,7 +367,7 @@ impl Adapter<'static> for DemoAdapter {
     }
 
     fn project_neighbors(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
@@ -695,7 +695,7 @@ impl Adapter<'static> for DemoAdapter {
     }
 
     fn can_coerce_to_type(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>>>,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,

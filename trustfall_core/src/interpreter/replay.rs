@@ -394,7 +394,7 @@ where
     type DataToken = DataToken;
 
     fn get_starting_tokens(
-        &mut self,
+        &self,
         edge: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
         query_hint: InterpretedQuery,
@@ -418,7 +418,7 @@ where
     }
 
     fn project_property(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'trace>,
         current_type_name: Arc<str>,
         field_name: Arc<str>,
@@ -450,7 +450,7 @@ where
 
     #[allow(clippy::type_complexity)]
     fn project_neighbors(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'trace>,
         current_type_name: Arc<str>,
         edge_name: Arc<str>,
@@ -490,7 +490,7 @@ where
     }
 
     fn can_coerce_to_type(
-        &mut self,
+        &self,
         data_contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'trace>,
         current_type_name: Arc<str>,
         coerce_to_type_name: Arc<str>,
@@ -532,9 +532,9 @@ pub fn assert_interpreted_results<'query, 'trace, DataToken>(
     'trace: 'query,
 {
     let next_op = Rc::new(RefCell::new(trace.ops.iter()));
-    let trace_reader_adapter = Rc::new(RefCell::new(TraceReaderAdapter {
+    let trace_reader_adapter = Rc::new(TraceReaderAdapter {
         next_op: next_op.clone(),
-    }));
+    });
 
     let query: Arc<IndexedQuery> = Arc::new(trace.ir_query.clone().try_into().unwrap());
     let arguments = Arc::new(

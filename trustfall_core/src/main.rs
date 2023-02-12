@@ -133,16 +133,14 @@ where
         test_query.ir_query.clone(),
         test_query.arguments,
     )));
-    let cloned_adapter = adapter.clone();
-    let adapter_tap = Rc::new(RefCell::new(AdapterTap::new(adapter, tracer.clone())));
+    let adapter_tap = Rc::new(AdapterTap::new(adapter, tracer.clone()));
 
     let execution_result = execution::interpret_ir(adapter_tap.clone(), query, arguments);
     match execution_result {
         Ok(results_iter) => {
             let results = tap_results(adapter_tap.clone(), results_iter).collect_vec();
 
-            let empty_tap = AdapterTap::new(cloned_adapter, tracer);
-            let trace = adapter_tap.replace(empty_tap).finish();
+            let trace = adapter_tap.finish();
             let data = TestInterpreterOutputTrace {
                 schema_name: test_query.schema_name,
                 trace,

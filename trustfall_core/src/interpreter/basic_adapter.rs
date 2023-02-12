@@ -51,7 +51,7 @@ pub trait BasicAdapter<'vertex> {
     /// - The specified edge is a starting edge in the schema being queried.
     /// - Any parameters the edge requires per the schema have values provided.
     fn resolve_starting_vertices(
-        &mut self,
+        &self,
         edge_name: &str,
         parameters: Option<&EdgeParameters>,
     ) -> VertexIterator<'vertex, Self::Vertex>;
@@ -78,7 +78,7 @@ pub trait BasicAdapter<'vertex> {
     /// - Produce property values whose type matches the property's type defined in the schema.
     /// - When a context's active vertex is `None`, its property value is `FieldValue::Null`.
     fn resolve_property(
-        &mut self,
+        &self,
         contexts: ContextIterator<'vertex, Self::Vertex>,
         type_name: &str,
         property_name: &str,
@@ -109,7 +109,7 @@ pub trait BasicAdapter<'vertex> {
     /// - Each neighboring vertex is of the type specified for that edge in the schema.
     /// - When a context's active vertex is None, it has an empty neighbors iterator.
     fn resolve_neighbors(
-        &mut self,
+        &self,
         contexts: ContextIterator<'vertex, Self::Vertex>,
         type_name: &str,
         edge_name: &str,
@@ -151,7 +151,7 @@ pub trait BasicAdapter<'vertex> {
     /// - Each neighboring vertex is of the type specified for that edge in the schema.
     /// - When a context's active vertex is `None`, its coercion outcome is `false`.
     fn resolve_coercion(
-        &mut self,
+        &self,
         contexts: ContextIterator<'vertex, Self::Vertex>,
         type_name: &str,
         coerce_to_type: &str,
@@ -165,7 +165,7 @@ where
     type DataToken = T::Vertex;
 
     fn get_starting_tokens(
-        &mut self,
+        &self,
         edge: std::sync::Arc<str>,
         parameters: Option<std::sync::Arc<EdgeParameters>>,
         _query_hint: InterpretedQuery,
@@ -179,7 +179,7 @@ where
     }
 
     fn project_property(
-        &mut self,
+        &self,
         contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: std::sync::Arc<str>,
         field_name: std::sync::Arc<str>,
@@ -195,7 +195,7 @@ where
     }
 
     fn project_neighbors(
-        &mut self,
+        &self,
         contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: std::sync::Arc<str>,
         edge_name: std::sync::Arc<str>,
@@ -221,7 +221,7 @@ where
     }
 
     fn can_coerce_to_type(
-        &mut self,
+        &self,
         contexts: Box<dyn Iterator<Item = DataContext<Self::DataToken>> + 'token>,
         current_type_name: std::sync::Arc<str>,
         coerce_to_type_name: std::sync::Arc<str>,
