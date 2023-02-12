@@ -1,6 +1,7 @@
 /// IR of the values of Trustfall fields.
 use async_graphql_value::{ConstValue, Number, Value};
 use chrono::{DateTime, Utc};
+use dbg_pls::DebugPls;
 use serde::{Deserialize, Serialize};
 
 /// Values of fields in Trustfall.
@@ -24,6 +25,24 @@ pub enum FieldValue {
     DateTimeUtc(DateTime<Utc>),
     Enum(String),
     List(Vec<FieldValue>),
+}
+impl DebugPls for FieldValue {
+    fn fmt(&self, f: ::dbg_pls::Formatter<'_>) {
+        match self {
+            Self::Null => f.debug_ident("Null"),
+            Self::Int64(x) => f.debug_tuple_struct("Int64").field(x).finish(),
+            Self::Uint64(x) => f.debug_tuple_struct("Uint64").field(x).finish(),
+            Self::Float64(x) => f.debug_tuple_struct("Float64").field(x).finish(),
+            Self::String(x) => f.debug_tuple_struct("String").field(x).finish(),
+            Self::Boolean(x) => f.debug_tuple_struct("Boolean").field(x).finish(),
+            Self::DateTimeUtc(x) => f
+                .debug_tuple_struct("DateTimeUtc")
+                .field(&x.to_rfc3339())
+                .finish(),
+            Self::Enum(x) => f.debug_tuple_struct("Enum").field(x).finish(),
+            Self::List(x) => f.debug_tuple_struct("List").field(x).finish(),
+        }
+    }
 }
 
 /// Values of fields in GraphQL types.

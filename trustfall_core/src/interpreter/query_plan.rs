@@ -4,10 +4,12 @@ use std::{
     sync::Arc,
 };
 
+use dbg_pls::DebugPls;
+
 use crate::ir::{
-    indexed::IndexedQuery, Argument, ContextField, EdgeParameters, Eid, FieldRef,
-    FoldSpecificFieldKind, IREdge, IRFold, IRQueryComponent, IRVertex, LocalField, Operation,
-    Recursive, Vid,
+    indexed::{EdgeKind, IndexedQuery},
+    Argument, ContextField, EdgeParameters, Eid, FieldRef, FoldSpecificFieldKind, IREdge, IRFold,
+    IRQueryComponent, IRVertex, LocalField, Operation, Recursive, Type, Vid,
 };
 
 #[derive(Debug, Clone)]
@@ -17,19 +19,11 @@ pub struct QueryPlan {
     pub vid: Vid,
     pub plan: Vec<QueryPlanItem>,
     pub outputs: Vec<Arc<str>>,
+    pub variables: BTreeMap<Arc<str>, Type>,
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone)]
-pub enum ProjectKind {
-    /// Store the value into the value stack
-    Values,
-    /// Store the value directly into the imported tags
-    ImportedField(FieldRef),
-}
-
-#[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DebugPls)]
 pub enum CoerceKind {
     /// If we cannot coerce, discard the token.
     Filter,
@@ -42,7 +36,7 @@ pub enum CoerceKind {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DebugPls)]
 pub enum ExpandKind {
     /// Neighbors will be flattened with their parent contexts
     Required,
@@ -61,14 +55,13 @@ pub enum ExpandKind {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DebugPls)]
 pub enum QueryPlanItem {
     /// Extract a property's value from the current token
     ProjectProperty {
         type_name: Arc<str>,
         vid: Vid,
         field_name: Arc<str>,
-        kind: ProjectKind,
     },
     /// Try to convert the current value to the new type
     Coerce {
@@ -112,6 +105,8 @@ pub enum QueryPlanItem {
     /// If there is no current token, insert an empty token into the suspended
     /// stack
     SuspendNone,
+    /// Suspend the current context
+    Suspend,
 
     /// Collect the outputs from fold
     FoldOutputs {
@@ -119,7 +114,7 @@ pub enum QueryPlanItem {
         vid: Vid,
         output_names: Vec<Arc<str>>,
         fold_specific_outputs: BTreeMap<Arc<str>, FoldSpecificFieldKind>,
-        folds: BTreeMap<Eid, Arc<IRFold>>,
+        folded_keys: BTreeSet<(Eid, Arc<str>)>,
         plan: Vec<QueryPlanItem>,
     },
 
@@ -144,32 +139,19 @@ pub fn query_plan(indexed_query: Arc<IndexedQuery>) -> QueryPlan {
         edge: root_edge,
         vid: root_vid,
         outputs,
+        variables: indexed_query.ir_query.variables.clone(),
     }
 }
 
 fn coerce_if_needed(vertex: &IRVertex, output: &mut Vec<QueryPlanItem>) {
     if let Some(coerced_from) = vertex.coerced_from_type.as_ref() {
-        perform_coercion(
-            vertex,
-            coerced_from.clone(),
-            vertex.type_name.clone(),
-            output,
-        );
+        output.push(QueryPlanItem::Coerce {
+            coerced_from: coerced_from.clone(),
+            coerce_to: vertex.type_name.clone(),
+            vid: vertex.vid,
+            kind: CoerceKind::Filter,
+        });
     }
-}
-
-fn perform_coercion(
-    vertex: &IRVertex,
-    coerced_from: Arc<str>,
-    coerce_to: Arc<str>,
-    output: &mut Vec<QueryPlanItem>,
-) {
-    output.push(QueryPlanItem::Coerce {
-        coerced_from,
-        coerce_to,
-        vid: vertex.vid,
-        kind: CoerceKind::Filter,
-    });
 }
 
 fn compute_component(query: Arc<IndexedQuery>, component: &IRQueryComponent) -> Vec<QueryPlanItem> {
@@ -187,49 +169,26 @@ fn compute_component(query: Arc<IndexedQuery>, component: &IRQueryComponent) -> 
 
     output.push(QueryPlanItem::Record(component_root_vid));
 
-    let mut visited_vids: BTreeSet<Vid> = btreeset! {component_root_vid};
+    let iter = OrderedIter {
+        edge: component.edges.values(),
+        fold: component.folds.values(),
+        previous: None,
+    };
 
-    let mut edge_iter = component.edges.values();
-    let mut fold_iter = component.folds.values();
-    let mut next_edge = edge_iter.next();
-    let mut next_fold = fold_iter.next();
-    loop {
-        let (process_next_fold, process_next_edge) = match (next_fold, next_edge) {
-            (None, None) => break,
-            (None, Some(_)) | (Some(_), None) => (next_fold, next_edge),
-            (Some(fold), Some(edge)) => match fold.eid.cmp(&edge.eid) {
-                std::cmp::Ordering::Greater => (None, Some(edge)),
-                std::cmp::Ordering::Less => (Some(fold), None),
-                std::cmp::Ordering::Equal => unreachable!(),
-            },
-        };
-
-        assert!(process_next_fold.is_some() ^ process_next_edge.is_some());
-
-        if let Some(fold) = process_next_fold {
-            let from_vid_unvisited = visited_vids.insert(fold.from_vid);
-            let to_vid_unvisited = visited_vids.insert(fold.to_vid);
-            assert!(!from_vid_unvisited);
-            assert!(to_vid_unvisited);
-
-            compute_fold(
-                query.clone(),
-                &component.vertices[&fold.from_vid],
-                component,
-                fold.clone(),
-                &mut output,
-            );
-
-            next_fold = fold_iter.next();
-        } else if let Some(edge) = process_next_edge {
-            let from_vid_unvisited = visited_vids.insert(edge.from_vid);
-            let to_vid_unvisited = visited_vids.insert(edge.to_vid);
-            assert!(!from_vid_unvisited);
-            assert!(to_vid_unvisited);
-
-            expand_edge(component, edge.from_vid, edge.to_vid, edge, &mut output);
-
-            next_edge = edge_iter.next();
+    for next in iter {
+        match next {
+            EdgeKind::Fold(fold) => {
+                compute_fold(
+                    query.clone(),
+                    &component.vertices[&fold.from_vid],
+                    component,
+                    fold,
+                    &mut output,
+                );
+            }
+            EdgeKind::Regular(edge) => {
+                expand_edge(component, edge.from_vid, edge.to_vid, &edge, &mut output);
+            }
         }
     }
 
@@ -255,7 +214,6 @@ fn construct_outputs(
             type_name: component.vertices[&vertex_id].type_name.clone(),
             vid: vertex_id,
             field_name: context_field.field_name.clone(),
-            kind: ProjectKind::Values,
         })
     }
 
@@ -270,11 +228,15 @@ fn compute_fold(
     output: &mut Vec<QueryPlanItem>,
 ) {
     // Get any imported tag values needed inside the fold component or one of its subcomponents.
+    let mut last_vertex = None;
     for imported_field in fold.imported_tags.iter() {
         match &imported_field {
             FieldRef::ContextField(field) => {
                 let vertex_id = field.vertex_id;
-                output.push(QueryPlanItem::Activate(vertex_id));
+                if last_vertex != Some(vertex_id) {
+                    output.push(QueryPlanItem::Activate(vertex_id));
+                    last_vertex = Some(vertex_id);
+                }
 
                 let field_vertex = &parent_component.vertices[&field.vertex_id];
                 let type_name = field_vertex.type_name.clone();
@@ -282,20 +244,17 @@ fn compute_fold(
                     type_name,
                     vid: field.vertex_id,
                     field_name: field.field_name.clone(),
-                    kind: ProjectKind::ImportedField(imported_field.clone()),
                 });
             }
             FieldRef::FoldSpecificField(fold_specific_field) => {
-                let cloned_field = imported_field.clone();
                 compute_fold_specific_field(
                     fold_specific_field.fold_eid,
                     &fold_specific_field.kind,
                     output,
                 );
-
-                output.push(QueryPlanItem::PopIntoImport(cloned_field));
             }
         }
+        output.push(QueryPlanItem::PopIntoImport(imported_field.clone()));
     }
 
     // Get the initial vertices inside the folded scope.
@@ -330,12 +289,27 @@ fn compute_fold(
 
     let mut fold_outputs = vec![];
     let output_names = construct_outputs(&fold.component, &mut fold_outputs);
+
+    let mut folded_keys: BTreeSet<(Eid, Arc<str>)> = Default::default();
+    // We need to make sure any outputs from any nested @fold components (recursively)
+    // are set to empty lists.
+    let mut queue: Vec<_> = fold.component.folds.values().collect();
+    while let Some(inner_fold) = queue.pop() {
+        for output in inner_fold.fold_specific_outputs.keys() {
+            folded_keys.insert((inner_fold.eid, output.clone()));
+        }
+        for output in inner_fold.component.outputs.keys() {
+            folded_keys.insert((inner_fold.eid, output.clone()));
+        }
+        queue.extend(inner_fold.component.folds.values());
+    }
+
     output.push(QueryPlanItem::FoldOutputs {
         eid: fold.eid,
         vid: expanding_from_vid,
         output_names,
         fold_specific_outputs: fold.fold_specific_outputs.clone(),
-        folds: fold.component.folds.clone(),
+        folded_keys,
         plan: fold_outputs,
     });
 }
@@ -413,6 +387,7 @@ fn compute_context_field(
     let vertex_id = context_field.vertex_id;
 
     if let Some(vertex) = component.vertices.get(&vertex_id) {
+        output.push(QueryPlanItem::Suspend);
         output.push(QueryPlanItem::Activate(vertex_id));
 
         let type_name = vertex.type_name.clone();
@@ -420,7 +395,6 @@ fn compute_context_field(
             type_name,
             vid: vertex_id,
             field_name: context_field.field_name.clone(),
-            kind: ProjectKind::Values,
         });
         output.push(QueryPlanItem::Unsuspend);
     } else {
@@ -452,7 +426,6 @@ fn compute_local_field(
         type_name,
         vid: current_vid,
         field_name: local_field.field_name.clone(),
-        kind: ProjectKind::Values,
     });
 }
 
@@ -595,4 +568,63 @@ fn perform_one_recursive_edge_expansion(
         vid: expanding_from.vid,
         kind: ExpandKind::Recursive,
     });
+}
+
+/// Returns folds/edges ordered by their [`Eid`]
+struct OrderedIter<'a> {
+    edge: std::collections::btree_map::Values<'a, Eid, Arc<IREdge>>,
+    fold: std::collections::btree_map::Values<'a, Eid, Arc<IRFold>>,
+    previous: Option<EdgeKind>,
+}
+
+impl Iterator for OrderedIter<'_> {
+    type Item = EdgeKind;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.previous.take() {
+            // if the last saved value was an edge, try compare it to a fold
+            Some(EdgeKind::Regular(edge)) => match self.fold.next() {
+                // edge comes first
+                Some(fold) if edge.eid < fold.eid => {
+                    self.previous = Some(EdgeKind::Fold(fold.clone()));
+                    Some(EdgeKind::Regular(edge))
+                }
+                // fold comes first
+                Some(fold) => {
+                    self.previous = Some(EdgeKind::Regular(edge));
+                    Some(EdgeKind::Fold(fold.clone()))
+                }
+                None => Some(EdgeKind::Regular(edge)),
+            },
+            // if the last saved value was a fold, try compare it to an edge
+            Some(EdgeKind::Fold(fold)) => match self.edge.next() {
+                // edge comes first
+                Some(edge) if edge.eid < fold.eid => {
+                    self.previous = Some(EdgeKind::Fold(fold));
+                    Some(EdgeKind::Regular(edge.clone()))
+                }
+                // fold comes first
+                Some(edge) => {
+                    self.previous = Some(EdgeKind::Regular(edge.clone()));
+                    Some(EdgeKind::Fold(fold))
+                }
+                None => Some(EdgeKind::Fold(fold)),
+            },
+            // if there was no saved value, get both and try
+            None => match (self.edge.next(), self.fold.next()) {
+                (None, None) => None,
+                (None, Some(fold)) => Some(EdgeKind::Fold(fold.clone())),
+                (Some(edge), None) => Some(EdgeKind::Regular(edge.clone())),
+                // edge comes first
+                (Some(edge), Some(fold)) if edge.eid < fold.eid => {
+                    self.previous = Some(EdgeKind::Fold(fold.clone()));
+                    Some(EdgeKind::Regular(edge.clone()))
+                }
+                // fold comes first
+                (Some(edge), Some(fold)) => {
+                    self.previous = Some(EdgeKind::Regular(edge.clone()));
+                    Some(EdgeKind::Fold(fold.clone()))
+                }
+            },
+        }
+    }
 }

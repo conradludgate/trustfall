@@ -8,8 +8,9 @@ pub mod value;
 
 use std::{cmp::Ordering, collections::BTreeMap, fmt::Debug, num::NonZeroUsize, sync::Arc};
 
-use async_graphql_parser::types::{BaseType, Type};
+use async_graphql_parser::types::{BaseType, Type as Typ};
 use async_graphql_value::Name;
+use dbg_pls::DebugPls;
 use serde::{Deserialize, Serialize};
 
 use crate::frontend::error::FilterTypeError;
@@ -23,7 +24,7 @@ pub(crate) const TYPENAME_META_FIELD: &str = "__typename";
 
 lazy_static! {
     pub(crate) static ref TYPENAME_META_FIELD_NAME: Name = Name::new(TYPENAME_META_FIELD);
-    pub(crate) static ref TYPENAME_META_FIELD_TYPE: Type = Type::new("String!").unwrap();
+    pub(crate) static ref TYPENAME_META_FIELD_TYPE: Typ = Typ::new("String!").unwrap();
     pub(crate) static ref TYPENAME_META_FIELD_ARC: Arc<str> = Arc::from(TYPENAME_META_FIELD);
 }
 
@@ -38,6 +39,12 @@ impl Vid {
     }
 }
 
+impl dbg_pls::DebugPls for Vid {
+    fn fmt(&self, f: dbg_pls::Formatter<'_>) {
+        f.debug_tuple_struct("Vid").field(&self.0.get()).finish()
+    }
+}
+
 /// Edge ID
 #[doc(alias = "edge")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -49,7 +56,13 @@ impl Eid {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl dbg_pls::DebugPls for Eid {
+    fn fmt(&self, f: dbg_pls::Formatter<'_>) {
+        f.debug_tuple_struct("Eid").field(&self.0.get()).finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
 pub struct EdgeParameters(
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")] pub BTreeMap<Arc<str>, FieldValue>,
 );
@@ -178,20 +191,20 @@ pub struct IRFold {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, DebugPls)]
 pub enum FoldSpecificFieldKind {
     Count, // Represents the number of elements in an IRFold's component.
 }
 
 lazy_static! {
-    static ref NON_NULL_INT_TYPE: Type = Type {
+    static ref NON_NULL_INT_TYPE: Typ = Typ {
         base: BaseType::Named(Name::new("Int")),
         nullable: false,
     };
 }
 
 impl FoldSpecificFieldKind {
-    pub fn field_type(&self) -> &Type {
+    pub fn field_type(&self) -> &Typ {
         match self {
             Self::Count => &NON_NULL_INT_TYPE,
         }
@@ -210,7 +223,7 @@ impl FoldSpecificFieldKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
 pub struct FoldSpecificField {
     // uniquely identifies the fold
     pub fold_eid: Eid,
@@ -229,7 +242,7 @@ pub enum TransformationKind {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
 pub enum FieldRef {
     ContextField(ContextField),
     FoldSpecificField(FoldSpecificField),
@@ -270,9 +283,9 @@ impl From<FoldSpecificField> for FieldRef {
 }
 
 impl FieldRef {
-    pub fn field_type(&self) -> &Type {
+    pub fn field_type(&self) -> &Typ {
         match self {
-            FieldRef::ContextField(c) => &c.field_type,
+            FieldRef::ContextField(c) => &c.field_type.0,
             FieldRef::FoldSpecificField(f) => f.kind.field_type(),
         }
     }
@@ -285,7 +298,7 @@ impl FieldRef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
 pub enum Argument {
     Tag(FieldRef),
     Variable(VariableRef),
@@ -308,7 +321,7 @@ impl Argument {
 /// ```
 /// would produce the `Operation::Equals` variant, for example.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
 pub enum Operation<LeftT, RightT>
 where
     LeftT: Debug + Clone + PartialEq + Eq,
@@ -749,7 +762,37 @@ impl<LeftT: NamedTypedValue> Operation<LeftT, Argument> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Type(pub async_graphql_parser::types::Type);
+
+impl DebugPls for Type {
+    fn fmt(&self, f: dbg_pls::Formatter<'_>) {
+        TypeInner(&self.0).fmt(f)
+    }
+}
+struct TypeInner<'a>(&'a async_graphql_parser::types::Type);
+
+impl DebugPls for TypeInner<'_> {
+    fn fmt(&self, f: dbg_pls::Formatter<'_>) {
+        f.debug_struct("Type")
+            .field("nullable", &self.0.nullable)
+            .field("base", &BaseTypeInner(&self.0.base))
+            .finish()
+    }
+}
+
+struct BaseTypeInner<'a>(&'a async_graphql_parser::types::BaseType);
+
+impl DebugPls for BaseTypeInner<'_> {
+    fn fmt(&self, f: dbg_pls::Formatter<'_>) {
+        match self.0 {
+            BaseType::Named(name) => f.debug_tuple_struct("Named").field(&name.as_str()).finish(),
+            BaseType::List(t) => f.debug_tuple_struct("List").field(&TypeInner(t)).finish(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
 pub struct ContextField {
     pub vertex_id: Vid,
 
@@ -760,7 +803,7 @@ pub struct ContextField {
     pub field_type: Type,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
 pub struct LocalField {
     pub field_name: Arc<str>,
 
@@ -769,7 +812,7 @@ pub struct LocalField {
     pub field_type: Type,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
 pub struct VariableRef {
     pub variable_name: Arc<str>,
 

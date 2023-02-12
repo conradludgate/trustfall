@@ -1,12 +1,13 @@
 use std::{collections::BTreeMap, convert::TryFrom, ptr, sync::Arc};
 
-use async_graphql_parser::types::{BaseType, Type};
+use async_graphql_parser::types::{BaseType, Type as Typ};
+use dbg_pls::DebugPls;
 use serde::{Deserialize, Serialize};
 
 use crate::util::BTreeMapTryInsertExt;
 
 use super::{
-    types::is_scalar_only_subtype, Argument, Eid, IREdge, IRFold, IRQuery, IRQueryComponent, Vid,
+    types::is_scalar_only_subtype, Argument, Eid, IREdge, IRFold, IRQuery, IRQueryComponent, Vid, Type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,7 +21,7 @@ pub struct IndexedQuery {
     pub outputs: BTreeMap<Arc<str>, Output>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
 pub struct Output {
     pub name: Arc<str>,
 
@@ -115,7 +116,7 @@ fn add_data_from_component(
                             //
                             // If the variable type at top level is not a subtype of the type here,
                             // this query is not valid.
-                            if !is_scalar_only_subtype(&vref.variable_type, var_type) {
+                            if !is_scalar_only_subtype(&vref.variable_type.0, &var_type.0) {
                                 return Err(InvalidIRQueryError::GetBetterVariant(-2));
                             }
                         }
@@ -147,10 +148,10 @@ fn add_data_from_component(
         } else {
             let mut wrapped_output_type = field.field_type.clone();
             for _ in 0..fold_depth {
-                wrapped_output_type = Type {
-                    base: BaseType::List(Box::new(wrapped_output_type)),
+                wrapped_output_type = Type(Typ {
+                    base: BaseType::List(Box::new(wrapped_output_type.0)),
                     nullable: false,
-                };
+                });
             }
             wrapped_output_type
         };
@@ -225,7 +226,7 @@ fn add_data_from_component(
                     name.clone(),
                     Output {
                         name: name.clone(),
-                        value_type: kind.field_type().clone(),
+                        value_type: Type(kind.field_type().clone()),
                         vid: fold.to_vid,
                     },
                 )

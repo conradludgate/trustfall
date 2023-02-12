@@ -5,10 +5,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ir::{
-        indexed::IndexedQuery, types::is_argument_type_valid, EdgeParameters, Eid, FieldRef,
-        FieldValue, Vid,
-    },
+    ir::{types::is_argument_type_valid, EdgeParameters, Eid, FieldRef, FieldValue, Vid},
     util::BTreeMapTryInsertExt,
 };
 
@@ -229,26 +226,25 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterpretedQuery {
-    pub indexed_query: Arc<IndexedQuery>,
     pub arguments: Arc<BTreeMap<Arc<str>, FieldValue>>,
 }
 
 impl InterpretedQuery {
     #[inline]
     pub fn from_query_and_arguments(
-        indexed_query: Arc<IndexedQuery>,
+        variables: &BTreeMap<Arc<str>, super::ir::Type>,
         arguments: Arc<BTreeMap<Arc<str>, FieldValue>>,
     ) -> Result<Self, QueryArgumentsError> {
         let mut errors = vec![];
 
         let mut missing_arguments = vec![];
-        for (variable_name, variable_type) in &indexed_query.ir_query.variables {
+        for (variable_name, variable_type) in variables {
             match arguments.get(variable_name) {
                 Some(argument_value) => {
                     // Ensure the provided argument value is valid for the variable's inferred type.
                     if let Err(e) = validate_argument_type(
                         variable_name.as_ref(),
-                        variable_type,
+                        &variable_type.0,
                         argument_value,
                     ) {
                         errors.push(e);
@@ -271,7 +267,7 @@ impl InterpretedQuery {
         let unused_arguments = arguments
             .keys()
             .map(|x| x.as_ref())
-            .filter(|arg| !indexed_query.ir_query.variables.contains_key(*arg))
+            .filter(|arg| !variables.contains_key(*arg))
             .collect_vec();
         if !unused_arguments.is_empty() {
             errors.push(QueryArgumentsError::UnusedArguments(
@@ -283,10 +279,7 @@ impl InterpretedQuery {
         }
 
         if errors.is_empty() {
-            Ok(Self {
-                indexed_query,
-                arguments,
-            })
+            Ok(Self { arguments })
         } else {
             Err(errors.into())
         }

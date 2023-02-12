@@ -321,7 +321,7 @@ fn make_local_field_filter_expr(
 ) -> Result<Operation<LocalField, Argument>, Vec<FrontendError>> {
     let left = LocalField {
         field_name: property_name.clone(),
-        field_type: property_type.clone(),
+        field_type: super::ir::Type(property_type.clone()),
     };
 
     make_filter_expr(
@@ -351,12 +351,14 @@ fn make_filter_expr<LeftT: NamedTypedValue>(
                 Ok(match arg {
                     OperatorArgument::VariableRef(var_name) => Argument::Variable(VariableRef {
                         variable_name: var_name.clone(),
-                        variable_type: infer_variable_type(
-                            left_operand.named(),
-                            left_operand.typed(),
-                            &filter_directive.operation,
-                        )
-                        .map_err(|e| *e)?,
+                        variable_type: super::ir::Type(
+                            infer_variable_type(
+                                left_operand.named(),
+                                left_operand.typed(),
+                                &filter_directive.operation,
+                            )
+                            .map_err(|e| *e)?,
+                        ),
                     }),
                     OperatorArgument::TagRef(tag_name) => {
                         let defined_tag = match tags.reference_tag(
@@ -462,7 +464,7 @@ pub(crate) fn make_ir_for_query(schema: &Schema, query: &Query) -> Result<IRQuer
             return Err(errors.into());
         }
     };
-    let mut variables: BTreeMap<Arc<str>, Type> = Default::default();
+    let mut variables: BTreeMap<Arc<str>, super::ir::Type> = Default::default();
     if let Err(v) = fill_in_query_variables(&mut variables, &root_component) {
         errors.extend(v.into_iter().map(|x| x.into()));
     }
@@ -511,7 +513,7 @@ fn collect_ir_vertices_recursive_step(
 }
 
 fn fill_in_query_variables(
-    variables: &mut BTreeMap<Arc<str>, Type>,
+    variables: &mut BTreeMap<Arc<str>, super::ir::Type>,
     component: &IRQueryComponent,
 ) -> Result<(), Vec<FilterTypeError>> {
     let mut errors: Vec<FilterTypeError> = vec![];
@@ -537,15 +539,15 @@ fn fill_in_query_variables(
             .entry(vref.variable_name.clone())
             .or_insert_with(|| vref.variable_type.clone());
 
-        match intersect_types(existing_type, &vref.variable_type) {
+        match intersect_types(&existing_type.0, &vref.variable_type.0) {
             Some(intersection) => {
-                *existing_type = intersection;
+                *existing_type = super::ir::Type(intersection);
             }
             None => {
                 errors.push(FilterTypeError::IncompatibleVariableTypeRequirements(
                     vref.variable_name.to_string(),
-                    existing_type.to_string(),
-                    vref.variable_type.to_string(),
+                    existing_type.0.to_string(),
+                    vref.variable_type.0.to_string(),
                 ));
             }
         }
@@ -1184,7 +1186,7 @@ where
                 let field_ref = FieldRef::ContextField(ContextField {
                     vertex_id: current_vid,
                     field_name: subfield.name.clone(),
-                    field_type: subfield_raw_type.clone(),
+                    field_type: super::ir::Type(subfield_raw_type.clone()),
                 });
 
                 // The output's name can be either explicit or local (i.e. implicitly prefixed).
@@ -1226,7 +1228,7 @@ where
                 let tag_field = ContextField {
                     vertex_id: current_vid,
                     field_name: subfield.name.clone(),
-                    field_type: subfield_raw_type.to_owned(),
+                    field_type: super::ir::Type(subfield_raw_type.to_owned()),
                 };
 
                 // TODO: handle tags on non-fold-related transformed fields here

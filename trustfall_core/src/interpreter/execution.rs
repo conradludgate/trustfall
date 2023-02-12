@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fmt::Debug, rc::Rc, sync::Arc};
 
+use dbg_pls::color;
 use regex::Regex;
 
 use crate::{
@@ -20,7 +21,7 @@ use crate::{
 
 use super::{
     error::QueryArgumentsError,
-    query_plan::{query_plan, CoerceKind, ExpandKind, ProjectKind, QueryPlanItem},
+    query_plan::{query_plan, CoerceKind, ExpandKind, QueryPlan, QueryPlanItem},
     Adapter, DataContext, InterpretedQuery,
 };
 
@@ -33,9 +34,22 @@ pub fn interpret_ir<'query, DataToken>(
 where
     DataToken: Clone + Debug + 'query,
 {
-    let plan = query_plan(indexed_query.clone());
+    // color!(indexed_query.clone());
+    let plan = query_plan(indexed_query);
+    execute_plan(adapter, plan, arguments)
+}
 
-    let query = InterpretedQuery::from_query_and_arguments(indexed_query, arguments)?;
+#[allow(clippy::type_complexity)]
+pub fn execute_plan<'query, DataToken>(
+    adapter: Rc<impl Adapter<'query, DataToken = DataToken> + 'query>,
+    plan: QueryPlan,
+    arguments: Arc<BTreeMap<Arc<str>, FieldValue>>,
+) -> Result<Box<dyn Iterator<Item = BTreeMap<Arc<str>, FieldValue>> + 'query>, QueryArgumentsError>
+where
+    DataToken: Clone + Debug + 'query,
+{
+    color!(&plan.plan);
+    let query = InterpretedQuery::from_query_and_arguments(&plan.variables, arguments)?;
 
     let iter = {
         Box::new(
@@ -129,6 +143,7 @@ where
             }
             context
         })),
+        QueryPlanItem::Suspend => Box::new(iterator.map(move |context| context.ensure_suspended())),
         QueryPlanItem::PopIntoImport(field) => Box::new(iterator.map(move |mut ctx| {
             ctx.imported_tags.insert(
                 field.clone(),
@@ -145,22 +160,13 @@ where
             type_name,
             vid,
             field_name,
-            kind: store,
         } => {
             let a = adapter;
             let iter = a.project_property(iterator, type_name, field_name, query.clone(), vid);
-            match store {
-                ProjectKind::Values => Box::new(iter.map(|(mut context, value)| {
-                    context.values.push(value);
-                    context
-                })),
-                ProjectKind::ImportedField(imported_field) => {
-                    Box::new(iter.map(move |(mut context, value)| {
-                        context.imported_tags.insert(imported_field.clone(), value);
-                        context
-                    }))
-                }
-            }
+            Box::new(iter.map(|(mut context, value)| {
+                context.values.push(value);
+                context
+            }))
         }
 
         // type filter
@@ -221,7 +227,7 @@ where
             vid,
             output_names,
             fold_specific_outputs,
-            folds,
+            folded_keys,
             plan,
         } => {
             let query = query.clone();
@@ -261,17 +267,8 @@ where
                 if fold_elements.is_empty() {
                     // We need to make sure any outputs from any nested @fold components (recursively)
                     // are set to empty lists.
-                    let mut queue: Vec<_> = folds.values().collect();
-                    while let Some(inner_fold) = queue.pop() {
-                        for output in inner_fold.fold_specific_outputs.keys() {
-                            folded_values
-                                .insert((inner_fold.eid, output.clone()), default_value.clone());
-                        }
-                        for output in inner_fold.component.outputs.keys() {
-                            folded_values
-                                .insert((inner_fold.eid, output.clone()), default_value.clone());
-                        }
-                        queue.extend(inner_fold.component.folds.values());
+                    for key in &folded_keys {
+                        folded_values.insert(key.clone(), default_value.clone());
                     }
                 } else {
                     let output_iterator = build_plan(
@@ -788,7 +785,7 @@ mod tests {
 
         let indexed_query: IndexedQuery = test_query.ir_query.try_into().unwrap();
         let constructed_test_item = InterpretedQuery::from_query_and_arguments(
-            Arc::from(indexed_query),
+            &indexed_query.ir_query.variables,
             Arc::from(arguments),
         );
 

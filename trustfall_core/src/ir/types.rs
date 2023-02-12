@@ -15,7 +15,7 @@ pub trait NamedTypedValue: Debug + Clone + PartialEq + Eq {
 
 impl NamedTypedValue for LocalField {
     fn typed(&self) -> &Type {
-        &self.field_type
+        &self.field_type.0
     }
 
     fn named(&self) -> &str {
@@ -25,7 +25,7 @@ impl NamedTypedValue for LocalField {
 
 impl NamedTypedValue for ContextField {
     fn typed(&self) -> &Type {
-        &self.field_type
+        &self.field_type.0
     }
 
     fn named(&self) -> &str {
@@ -55,7 +55,7 @@ impl NamedTypedValue for FoldSpecificFieldKind {
 
 impl NamedTypedValue for VariableRef {
     fn typed(&self) -> &Type {
-        &self.variable_type
+        &self.variable_type.0
     }
 
     fn named(&self) -> &str {
