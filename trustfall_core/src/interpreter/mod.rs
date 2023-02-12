@@ -1,11 +1,12 @@
-use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
+use std::{cmp::Ordering, collections::BTreeMap, fmt::Debug, sync::Arc};
 
 use async_graphql_parser::types::Type;
+use dbg_pls::DebugPls;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ir::{types::is_argument_type_valid, EdgeParameters, Eid, FieldRef, FieldValue, Vid},
+    ir::{types::is_argument_type_valid, EdgeParameters, Eid, FieldValue, FoldSpecificField, Vid},
     util::BTreeMapTryInsertExt,
 };
 
@@ -30,6 +31,56 @@ pub struct DataContext<DataToken: Clone + Debug> {
     folded_values: BTreeMap<(Eid, Arc<str>), Option<ValueOrVec>>,
     piggyback: Option<Vec<DataContext<DataToken>>>,
     imported_tags: BTreeMap<FieldRef, FieldValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
+pub enum FieldRef {
+    ContextField(ContextField),
+    FoldSpecificField(FoldSpecificField),
+}
+
+impl Ord for FieldRef {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (FieldRef::ContextField(f1), FieldRef::ContextField(f2)) => f1
+                .vertex_id
+                .cmp(&f2.vertex_id)
+                .then(f1.field_name.as_ref().cmp(f2.field_name.as_ref())),
+            (FieldRef::ContextField(_), FieldRef::FoldSpecificField(_)) => Ordering::Less,
+            (FieldRef::FoldSpecificField(_), FieldRef::ContextField(_)) => Ordering::Greater,
+            (FieldRef::FoldSpecificField(f1), FieldRef::FoldSpecificField(f2)) => {
+                f1.fold_eid.cmp(&f2.fold_eid).then(f1.kind.cmp(&f2.kind))
+            }
+        }
+    }
+}
+impl PartialOrd for FieldRef {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl From<crate::ir::ContextField> for ContextField {
+    fn from(c: crate::ir::ContextField) -> Self {
+        ContextField {
+            vertex_id: c.vertex_id,
+            field_name: c.field_name,
+        }
+    }
+}
+impl From<crate::ir::FieldRef> for FieldRef {
+    fn from(value: crate::ir::FieldRef) -> Self {
+        match value {
+            crate::ir::FieldRef::ContextField(c) => FieldRef::ContextField(c.into()),
+            crate::ir::FieldRef::FoldSpecificField(f) => FieldRef::FoldSpecificField(f),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
+pub struct ContextField {
+    pub vertex_id: Vid,
+    pub field_name: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,7 +283,7 @@ pub struct InterpretedQuery {
 impl InterpretedQuery {
     #[inline]
     pub fn from_query_and_arguments(
-        variables: &BTreeMap<Arc<str>, super::ir::Type>,
+        variables: &BTreeMap<Arc<str>, Type>,
         arguments: Arc<BTreeMap<Arc<str>, FieldValue>>,
     ) -> Result<Self, QueryArgumentsError> {
         let mut errors = vec![];
@@ -244,7 +295,7 @@ impl InterpretedQuery {
                     // Ensure the provided argument value is valid for the variable's inferred type.
                     if let Err(e) = validate_argument_type(
                         variable_name.as_ref(),
-                        &variable_type.0,
+                        variable_type,
                         argument_value,
                     ) {
                         errors.push(e);

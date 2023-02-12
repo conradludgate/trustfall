@@ -1,16 +1,20 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
     fmt::Debug,
     sync::Arc,
 };
 
+use async_graphql_parser::types::Type;
 use dbg_pls::DebugPls;
 
 use crate::ir::{
     indexed::{EdgeKind, IndexedQuery},
-    Argument, ContextField, EdgeParameters, Eid, FieldRef, FoldSpecificFieldKind, IREdge, IRFold,
-    IRQueryComponent, IRVertex, LocalField, Operation, Recursive, Type, Vid,
+    Argument, ContextField, EdgeParameters, Eid, FoldSpecificFieldKind, IREdge, IRFold,
+    IRQueryComponent, IRVertex, LocalField, Operation, Recursive, Vid,
 };
+
+use super::FieldRef;
 
 #[derive(Debug, Clone)]
 pub struct QueryPlan {
@@ -50,8 +54,14 @@ pub enum ExpandKind {
     Fold {
         plan: Vec<QueryPlanItem>,
         tags: Vec<FieldRef>,
-        post_fold_filters: Vec<Operation<FoldSpecificFieldKind, Argument>>,
+        post_fold_filters: Vec<Operation<FoldSpecificFieldKind, SimpleArgument>>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, DebugPls)]
+pub enum SimpleArgument {
+    Tag(Vid),
+    Variable(Arc<str>),
 }
 
 #[non_exhaustive]
@@ -93,7 +103,7 @@ pub enum QueryPlanItem {
 
     /// Perform a filtering using the expression, with the last
     /// value in the stack as the left hand side
-    Filter(Operation<(), Argument>),
+    Filter(Operation<(), SimpleArgument>),
 
     /// Record the current token at the given vertex
     Record(Vid),
@@ -231,7 +241,7 @@ fn compute_fold(
     let mut last_vertex = None;
     for imported_field in fold.imported_tags.iter() {
         match &imported_field {
-            FieldRef::ContextField(field) => {
+            crate::ir::FieldRef::ContextField(field) => {
                 let vertex_id = field.vertex_id;
                 if last_vertex != Some(vertex_id) {
                     output.push(QueryPlanItem::Activate(vertex_id));
@@ -246,7 +256,7 @@ fn compute_fold(
                     field_name: field.field_name.clone(),
                 });
             }
-            FieldRef::FoldSpecificField(fold_specific_field) => {
+            crate::ir::FieldRef::FoldSpecificField(fold_specific_field) => {
                 compute_fold_specific_field(
                     fold_specific_field.fold_eid,
                     &fold_specific_field.kind,
@@ -254,7 +264,7 @@ fn compute_fold(
                 );
             }
         }
-        output.push(QueryPlanItem::PopIntoImport(imported_field.clone()));
+        output.push(QueryPlanItem::PopIntoImport(imported_field.clone().into()));
     }
 
     // Get the initial vertices inside the folded scope.
@@ -271,8 +281,32 @@ fn compute_fold(
         eid: fold.eid,
         kind: ExpandKind::Fold {
             plan: compute_component(query, &fold.component),
-            tags: fold.imported_tags.clone(),
-            post_fold_filters: fold.post_filters.clone(),
+            tags: fold
+                .imported_tags
+                .iter()
+                .map(|f| f.clone().into())
+                .collect(),
+            post_fold_filters: fold
+                .post_filters
+                .iter()
+                .map(|op| {
+                    op.try_map(
+                        |l| Ok::<_, Infallible>(*l),
+                        |right| match right {
+                            Argument::Tag(crate::ir::FieldRef::ContextField(cf)) => {
+                                Ok(SimpleArgument::Tag(cf.vertex_id))
+                            }
+                            Argument::Tag(crate::ir::FieldRef::FoldSpecificField(fsf)) => {
+                                Ok(SimpleArgument::Tag(fsf.fold_root_vid))
+                            }
+                            Argument::Variable(v) => {
+                                Ok(SimpleArgument::Variable(v.variable_name.clone()))
+                            }
+                        },
+                    )
+                    .unwrap()
+                })
+                .collect(),
         },
     });
 
@@ -345,7 +379,7 @@ fn apply_filter<LeftT: Debug + Clone + PartialEq + Eq>(
     output: &mut Vec<QueryPlanItem>,
 ) {
     match filter.right() {
-        Some(Argument::Tag(FieldRef::ContextField(context_field))) => {
+        Some(Argument::Tag(crate::ir::FieldRef::ContextField(context_field))) => {
             if context_field.vertex_id == current_vid {
                 // This tag is from the vertex we're currently filtering. That means the field
                 // whose value we want to get is actually local, so there's no need to compute it
@@ -359,7 +393,7 @@ fn apply_filter<LeftT: Debug + Clone + PartialEq + Eq>(
                 compute_context_field(component, context_field, output);
             }
         }
-        Some(Argument::Tag(field_ref @ FieldRef::FoldSpecificField(fold_field))) => {
+        Some(Argument::Tag(field_ref @ crate::ir::FieldRef::FoldSpecificField(fold_field))) => {
             if component.folds.contains_key(&fold_field.fold_eid) {
                 // This value comes from one of this component's folds:
                 // the @tag is a sibling to the current computation and needs to be materialized.
@@ -367,7 +401,7 @@ fn apply_filter<LeftT: Debug + Clone + PartialEq + Eq>(
             } else {
                 // This value represents an imported tag value from an outer component.
                 // Grab its value from the context itself.
-                output.push(QueryPlanItem::ImportTag(field_ref.clone()));
+                output.push(QueryPlanItem::ImportTag(field_ref.clone().into()));
             }
         }
         Some(Argument::Variable(var)) => {
@@ -376,7 +410,23 @@ fn apply_filter<LeftT: Debug + Clone + PartialEq + Eq>(
         None => {}
     };
 
-    output.push(QueryPlanItem::Filter(filter.clone().right_only()));
+    output.push(QueryPlanItem::Filter(
+        filter
+            .clone()
+            .try_map::<_, _, _, _, Infallible>(
+                |_| Ok(()),
+                |right| match right {
+                    Argument::Tag(crate::ir::FieldRef::ContextField(cf)) => {
+                        Ok(SimpleArgument::Tag(cf.vertex_id))
+                    }
+                    Argument::Tag(crate::ir::FieldRef::FoldSpecificField(fsf)) => {
+                        Ok(SimpleArgument::Tag(fsf.fold_root_vid))
+                    }
+                    Argument::Variable(v) => Ok(SimpleArgument::Variable(v.variable_name.clone())),
+                },
+            )
+            .unwrap(),
+    ));
 }
 
 fn compute_context_field(
@@ -400,7 +450,7 @@ fn compute_context_field(
     } else {
         // This context field represents an imported tag value from an outer component.
         // Grab its value from the context itself.
-        let field_ref = FieldRef::ContextField(context_field.clone());
+        let field_ref = FieldRef::ContextField(context_field.clone().into());
         output.push(QueryPlanItem::ImportTag(field_ref));
     }
 }

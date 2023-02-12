@@ -8,7 +8,7 @@ pub mod value;
 
 use std::{cmp::Ordering, collections::BTreeMap, fmt::Debug, num::NonZeroUsize, sync::Arc};
 
-use async_graphql_parser::types::{BaseType, Type as Typ};
+use async_graphql_parser::types::{BaseType, Type};
 use async_graphql_value::Name;
 use dbg_pls::DebugPls;
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ pub(crate) const TYPENAME_META_FIELD: &str = "__typename";
 
 lazy_static! {
     pub(crate) static ref TYPENAME_META_FIELD_NAME: Name = Name::new(TYPENAME_META_FIELD);
-    pub(crate) static ref TYPENAME_META_FIELD_TYPE: Typ = Typ::new("String!").unwrap();
+    pub(crate) static ref TYPENAME_META_FIELD_TYPE: Type = Type::new("String!").unwrap();
     pub(crate) static ref TYPENAME_META_FIELD_ARC: Arc<str> = Arc::from(TYPENAME_META_FIELD);
 }
 
@@ -197,14 +197,14 @@ pub enum FoldSpecificFieldKind {
 }
 
 lazy_static! {
-    static ref NON_NULL_INT_TYPE: Typ = Typ {
+    static ref NON_NULL_INT_TYPE: Type = Type {
         base: BaseType::Named(Name::new("Int")),
         nullable: false,
     };
 }
 
 impl FoldSpecificFieldKind {
-    pub fn field_type(&self) -> &Typ {
+    pub fn field_type(&self) -> &Type {
         match self {
             Self::Count => &NON_NULL_INT_TYPE,
         }
@@ -242,7 +242,7 @@ pub enum TransformationKind {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FieldRef {
     ContextField(ContextField),
     FoldSpecificField(FoldSpecificField),
@@ -283,9 +283,9 @@ impl From<FoldSpecificField> for FieldRef {
 }
 
 impl FieldRef {
-    pub fn field_type(&self) -> &Typ {
+    pub fn field_type(&self) -> &Type {
         match self {
-            FieldRef::ContextField(c) => &c.field_type.0,
+            FieldRef::ContextField(c) => &c.field_type,
             FieldRef::FoldSpecificField(f) => f.kind.field_type(),
         }
     }
@@ -298,7 +298,7 @@ impl FieldRef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Argument {
     Tag(FieldRef),
     Variable(VariableRef),
@@ -494,31 +494,6 @@ where
                 Operation::NotRegexMatches(map_left(left)?, map_right(right)?)
             }
         })
-    }
-
-    pub fn right_only(self) -> Operation<(), RightT> {
-        match self {
-            Operation::IsNull(_) => Operation::IsNull(()),
-            Operation::IsNotNull(_) => Operation::IsNotNull(()),
-            Operation::Equals(_, arg) => Operation::Equals((), arg),
-            Operation::NotEquals(_, arg) => Operation::NotEquals((), arg),
-            Operation::LessThan(_, arg) => Operation::LessThan((), arg),
-            Operation::LessThanOrEqual(_, arg) => Operation::LessThanOrEqual((), arg),
-            Operation::GreaterThan(_, arg) => Operation::GreaterThan((), arg),
-            Operation::GreaterThanOrEqual(_, arg) => Operation::GreaterThanOrEqual((), arg),
-            Operation::Contains(_, arg) => Operation::Contains((), arg),
-            Operation::NotContains(_, arg) => Operation::NotContains((), arg),
-            Operation::OneOf(_, arg) => Operation::OneOf((), arg),
-            Operation::NotOneOf(_, arg) => Operation::NotOneOf((), arg),
-            Operation::HasPrefix(_, arg) => Operation::HasPrefix((), arg),
-            Operation::NotHasPrefix(_, arg) => Operation::NotHasPrefix((), arg),
-            Operation::HasSuffix(_, arg) => Operation::HasSuffix((), arg),
-            Operation::NotHasSuffix(_, arg) => Operation::NotHasSuffix((), arg),
-            Operation::HasSubstring(_, arg) => Operation::HasSubstring((), arg),
-            Operation::NotHasSubstring(_, arg) => Operation::NotHasSubstring((), arg),
-            Operation::RegexMatches(_, arg) => Operation::RegexMatches((), arg),
-            Operation::NotRegexMatches(_, arg) => Operation::NotRegexMatches((), arg),
-        }
     }
 }
 
@@ -762,37 +737,7 @@ impl<LeftT: NamedTypedValue> Operation<LeftT, Argument> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Type(pub async_graphql_parser::types::Type);
-
-impl DebugPls for Type {
-    fn fmt(&self, f: dbg_pls::Formatter<'_>) {
-        TypeInner(&self.0).fmt(f)
-    }
-}
-struct TypeInner<'a>(&'a async_graphql_parser::types::Type);
-
-impl DebugPls for TypeInner<'_> {
-    fn fmt(&self, f: dbg_pls::Formatter<'_>) {
-        f.debug_struct("Type")
-            .field("nullable", &self.0.nullable)
-            .field("base", &BaseTypeInner(&self.0.base))
-            .finish()
-    }
-}
-
-struct BaseTypeInner<'a>(&'a async_graphql_parser::types::BaseType);
-
-impl DebugPls for BaseTypeInner<'_> {
-    fn fmt(&self, f: dbg_pls::Formatter<'_>) {
-        match self.0 {
-            BaseType::Named(name) => f.debug_tuple_struct("Named").field(&name.as_str()).finish(),
-            BaseType::List(t) => f.debug_tuple_struct("List").field(&TypeInner(t)).finish(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextField {
     pub vertex_id: Vid,
 
@@ -803,7 +748,7 @@ pub struct ContextField {
     pub field_type: Type,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalField {
     pub field_name: Arc<str>,
 
@@ -812,7 +757,7 @@ pub struct LocalField {
     pub field_type: Type,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DebugPls)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VariableRef {
     pub variable_name: Arc<str>,
 

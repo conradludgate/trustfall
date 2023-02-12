@@ -12,16 +12,13 @@ use crate::{
         },
         ValueOrVec,
     },
-    ir::{
-        indexed::IndexedQuery, Argument, Eid, FieldRef, FieldValue, FoldSpecificFieldKind,
-        Operation,
-    },
+    ir::{indexed::IndexedQuery, Eid, FieldValue, FoldSpecificFieldKind, Operation, Vid},
     util::BTreeMapTryInsertExt,
 };
 
 use super::{
     error::QueryArgumentsError,
-    query_plan::{query_plan, CoerceKind, ExpandKind, QueryPlan, QueryPlanItem},
+    query_plan::{query_plan, CoerceKind, ExpandKind, QueryPlan, QueryPlanItem, SimpleArgument},
     Adapter, DataContext, InterpretedQuery,
 };
 
@@ -376,22 +373,25 @@ where
 /// be used for further optimizations. Otherwise, return None.
 fn get_max_fold_count_limit(
     query: &InterpretedQuery,
-    post_fold_filters: &[Operation<FoldSpecificFieldKind, Argument>],
+    post_fold_filters: &[Operation<FoldSpecificFieldKind, SimpleArgument>],
 ) -> Option<usize> {
     let mut result: Option<usize> = None;
 
     for post_fold_filter in post_fold_filters {
         let next_limit = match post_fold_filter {
-            Operation::Equals(FoldSpecificFieldKind::Count, Argument::Variable(var_ref))
+            Operation::Equals(FoldSpecificFieldKind::Count, SimpleArgument::Variable(var_ref))
             | Operation::LessThanOrEqual(
                 FoldSpecificFieldKind::Count,
-                Argument::Variable(var_ref),
+                SimpleArgument::Variable(var_ref),
             ) => {
-                let variable_value = query.arguments[&var_ref.variable_name].as_usize().unwrap();
+                let variable_value = query.arguments[var_ref.as_ref()].as_usize().unwrap();
                 Some(variable_value)
             }
-            Operation::LessThan(FoldSpecificFieldKind::Count, Argument::Variable(var_ref)) => {
-                let variable_value = query.arguments[&var_ref.variable_name].as_usize().unwrap();
+            Operation::LessThan(
+                FoldSpecificFieldKind::Count,
+                SimpleArgument::Variable(var_ref),
+            ) => {
+                let variable_value = query.arguments[var_ref.as_ref()].as_usize().unwrap();
                 // saturating_sub() here is a safeguard against underflow: in principle,
                 // we shouldn't see a comparison for "< 0", but if we do regardless, we'd prefer to
                 // saturate to 0 rather than wrapping around. This check is an optimization and
@@ -399,8 +399,8 @@ fn get_max_fold_count_limit(
                 // The later full application of filters ensures correctness.
                 Some(variable_value.saturating_sub(1))
             }
-            Operation::OneOf(FoldSpecificFieldKind::Count, Argument::Variable(var_ref)) => {
-                match &query.arguments[&var_ref.variable_name] {
+            Operation::OneOf(FoldSpecificFieldKind::Count, SimpleArgument::Variable(var_ref)) => {
+                match &query.arguments[var_ref.as_ref()] {
                     FieldValue::List(v) => v.iter().map(|x| x.as_usize().unwrap()).max(),
                     _ => unreachable!(),
                 }
@@ -466,14 +466,8 @@ fn collect_fold_elements<'query, DataToken: Clone + Debug + 'query>(
 #[inline(always)]
 fn is_tag_optional_and_missing<'query, DataToken: Clone + Debug + 'query>(
     context: &DataContext<DataToken>,
-    tagged_field: &FieldRef,
+    vid: Vid,
 ) -> bool {
-    // Get a representative Vid that will show whether the tagged value exists or not.
-    let vid = match tagged_field {
-        FieldRef::ContextField(field) => field.vertex_id,
-        FieldRef::FoldSpecificField(field) => field.fold_root_vid,
-    };
-
     // Some(None) means "there's a value associated with that Vid, and it's None".
     // None would mean that the tagged value is local, i.e. nothing is associated with that Vid yet.
     // Some(Some(token)) would mean that a vertex was found and associated with that Vid.
@@ -482,14 +476,14 @@ fn is_tag_optional_and_missing<'query, DataToken: Clone + Debug + 'query>(
 
 fn filter_map<'query, DataToken: Clone + Debug + 'query>(
     expression_iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-    right: Argument,
+    right: SimpleArgument,
     mut f: impl for<'a> FnMut(&'a FieldValue, &'a FieldValue) -> bool + 'query,
 ) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
     Box::new(expression_iterator.filter_map(move |mut context| {
         let right_value = context.values.pop().unwrap();
         let left_value = context.values.pop().unwrap();
-        if let Argument::Tag(field) = &right {
-            if is_tag_optional_and_missing(&context, field) {
+        if let SimpleArgument::Tag(vid) = &right {
+            if is_tag_optional_and_missing(&context, *vid) {
                 return Some(context);
             }
         }
@@ -503,13 +497,9 @@ fn not<'query>(
     move |l, r| !f(l, r)
 }
 
-fn apply_filter<
-    'query,
-    DataToken: Clone + Debug + 'query,
-    LeftT: Debug + Clone + PartialEq + Eq,
->(
+fn apply_filter<'query, DataToken: Clone + Debug + 'query>(
     query: &InterpretedQuery,
-    filter: Operation<LeftT, Argument>,
+    filter: Operation<(), SimpleArgument>,
     expression_iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
 ) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
     match filter {
@@ -560,9 +550,11 @@ fn apply_filter<
             filter_map(expression_iterator, right, not(has_suffix))
         }
         Operation::RegexMatches(_, right) => match &right {
-            Argument::Tag(_) => filter_map(expression_iterator, right, regex_matches_slow_path),
-            Argument::Variable(var) => {
-                let variable_value = &query.arguments[var.variable_name.as_ref()];
+            SimpleArgument::Tag(_) => {
+                filter_map(expression_iterator, right, regex_matches_slow_path)
+            }
+            SimpleArgument::Variable(var) => {
+                let variable_value = &query.arguments[var.as_ref()];
                 let pattern = Regex::new(variable_value.as_str().unwrap()).unwrap();
 
                 Box::new(expression_iterator.filter_map(move |mut context| {
@@ -578,11 +570,11 @@ fn apply_filter<
             }
         },
         Operation::NotRegexMatches(_, right) => match &right {
-            Argument::Tag(_) => {
+            SimpleArgument::Tag(_) => {
                 filter_map(expression_iterator, right, not(regex_matches_slow_path))
             }
-            Argument::Variable(var) => {
-                let variable_value = &query.arguments[var.variable_name.as_ref()];
+            SimpleArgument::Variable(var) => {
+                let variable_value = &query.arguments[var.as_ref()];
                 let pattern = Regex::new(variable_value.as_str().unwrap()).unwrap();
 
                 Box::new(expression_iterator.filter_map(move |mut context| {

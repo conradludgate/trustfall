@@ -1,14 +1,13 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
+use async_graphql_parser::types::Type;
 use serde::{self, de::Visitor, Deserializer, Serialize, Serializer};
-
-use super::Type;
 
 pub fn serde_type_serializer<S>(value: &Type, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    value.0.to_string().serialize(serializer)
+    value.to_string().serialize(serializer)
 }
 
 pub fn serde_type_deserializer<'de, D>(deserializer: D) -> Result<Type, D::Error>
@@ -30,7 +29,7 @@ where
         {
             let ty = async_graphql_parser::types::Type::new(s)
                 .ok_or_else(|| serde::de::Error::custom("not a valid GraphQL type"))?;
-            Ok(Type(ty))
+            Ok(ty)
         }
     }
 
@@ -46,7 +45,7 @@ where
 {
     let converted: BTreeMap<&str, String> = value
         .iter()
-        .map(|(k, v)| (k.as_ref(), v.0.to_string()))
+        .map(|(k, v)| (k.as_ref(), v.to_string()))
         .collect();
     converted.serialize(serializer)
 }
@@ -82,7 +81,7 @@ where
         let mut result: BTreeMap<Arc<str>, Type> = Default::default();
         for (k, v) in value {
             let ty = async_graphql_parser::types::Type::new(v).unwrap();
-            result.insert(k, Type(ty));
+            result.insert(k, ty);
         }
         result
     })
