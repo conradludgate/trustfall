@@ -21,8 +21,8 @@ crate-type = ["lib"]
 serde = { version = "^1.0", features = ["derive", "rc"] }
 serde_json = "^1.0.0"
 ron = "^0.6.4"
-async-graphql-parser = "^2.11.3"
-async-graphql-value = "^2.11.3"
+async-graphql-parser = "5.0.6"
+async-graphql-value = "5.0.6"
 maplit = "^1.0.2"
 camino = "1.0.2"
 lazy_static = "^1.4.0"
