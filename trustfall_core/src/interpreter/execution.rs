@@ -41,7 +41,7 @@ where
         Box::new(
             adapter
                 .get_starting_tokens(plan.edge, plan.params, query.clone(), plan.vid)
-                .map(|x| DataContext::new(Some(x))),
+                .map(|x| DataContext::new(x)),
         )
     };
 
@@ -115,15 +115,12 @@ where
 
             context
         })),
-        QueryPlanItem::MoveTo(vid) => Box::new(iterator.map(move |context| {
-            let new_token = context.tokens[&vid].clone();
-            context.move_to_token(new_token)
-        })),
         QueryPlanItem::Record(vid) => Box::new(iterator.map(move |mut context| {
             context.record_token(vid);
             context
         })),
         QueryPlanItem::Activate(vid) => Box::new(iterator.map(move |x| x.activate_token(&vid))),
+        QueryPlanItem::Unsuspend => Box::new(iterator.map(move |x| x.unsuspend())),
         QueryPlanItem::SuspendNone => Box::new(iterator.map(move |mut context| {
             if context.current_token.is_none() {
                 // Mark that this token starts off with a None current_token value,
@@ -163,14 +160,6 @@ where
                         context
                     }))
                 }
-                ProjectKind::Suspend => Box::new(iter.map(|(mut context, value)| {
-                    context.values.push(value);
-
-                    // Make sure that the context has the same "current" token
-                    // as before evaluating the context field.
-                    let old_current_token = context.suspended_tokens.pop().unwrap();
-                    context.move_to_token(old_current_token)
-                })),
             }
         }
 
@@ -198,7 +187,7 @@ where
         }
 
         // expand
-        QueryPlanItem::Expand {
+        QueryPlanItem::Neighbors {
             type_name,
             edge_name,
             parameters,
@@ -206,17 +195,15 @@ where
             vid,
             kind,
         } => {
-            let iter = {
-                adapter.project_neighbors(
-                    iterator,
-                    type_name,
-                    edge_name,
-                    parameters,
-                    query.clone(),
-                    vid,
-                    eid,
-                )
-            };
+            let iter = adapter.project_neighbors(
+                iterator,
+                type_name,
+                edge_name,
+                parameters,
+                query.clone(),
+                vid,
+                eid,
+            );
             expand_neighbors(adapter, query, kind, eid, iter)
         }
 
@@ -336,22 +323,21 @@ fn expand_neighbors<'query, DataToken>(
     query: &InterpretedQuery,
     kind: ExpandKind,
     eid: Eid,
-    expand_iterator: Iter<'query, (DataContext<DataToken>, Iter<'query, DataToken>)>,
+    iter: Iter<'query, (DataContext<DataToken>, Iter<'query, DataToken>)>,
 ) -> Iter<'query, DataContext<DataToken>>
 where
     DataToken: Clone + Debug + 'query,
 {
     match kind {
-        ExpandKind::Normal { is_optional } => Box::new(expand_iterator.flat_map(
-            move |(context, neighbor_iterator)| {
-                EdgeExpander::new(context, neighbor_iterator, is_optional)
-            },
-        )),
-        ExpandKind::Recursive => Box::new(expand_iterator.flat_map(
-            move |(context, neighbor_iterator)| {
-                RecursiveEdgeExpander::new(context, neighbor_iterator)
-            },
-        )),
+        ExpandKind::Required => Box::new(iter.flat_map(move |(context, neighbor_iterator)| {
+            EdgeExpander::new(context, neighbor_iterator, false)
+        })),
+        ExpandKind::Optional => Box::new(iter.flat_map(move |(context, neighbor_iterator)| {
+            EdgeExpander::new(context, neighbor_iterator, true)
+        })),
+        ExpandKind::Recursive => Box::new(iter.flat_map(move |(context, neighbor_iterator)| {
+            RecursiveEdgeExpander::new(context, neighbor_iterator)
+        })),
         ExpandKind::Fold {
             plan,
             tags,
@@ -359,11 +345,11 @@ where
         } => {
             let max_fold_size = get_max_fold_count_limit(query, &post_fold_filters);
             let query = query.clone();
-            let folded_iterator = expand_iterator.filter_map(move |(mut context, neighbors)| {
+            let folded_iterator = iter.filter_map(move |(mut context, neighbors)| {
                 let imported_tags = context.imported_tags.clone();
 
                 let neighbor_contexts = Box::new(neighbors.map(move |x| {
-                    let mut ctx = DataContext::new(Some(x));
+                    let mut ctx = DataContext::new(x);
                     ctx.imported_tags = imported_tags.clone();
                     ctx
                 }));
@@ -497,44 +483,27 @@ fn is_tag_optional_and_missing<'query, DataToken: Clone + Debug + 'query>(
     matches!(context.tokens.get(&vid), Some(None))
 }
 
-macro_rules! implement_filter {
-    ( $iter: ident, $right: ident, $func: ident ) => {
-        Box::new($iter.filter_map(move |mut context| {
-            let right_value = context.values.pop().unwrap();
-            let left_value = context.values.pop().unwrap();
-            if let Argument::Tag(field) = &$right {
-                if is_tag_optional_and_missing(&context, field) {
-                    return Some(context);
-                }
+fn filter_map<'query, DataToken: Clone + Debug + 'query>(
+    expression_iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
+    right: Argument,
+    mut f: impl for<'a> FnMut(&'a FieldValue, &'a FieldValue) -> bool + 'query,
+) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
+    Box::new(expression_iterator.filter_map(move |mut context| {
+        let right_value = context.values.pop().unwrap();
+        let left_value = context.values.pop().unwrap();
+        if let Argument::Tag(field) = &right {
+            if is_tag_optional_and_missing(&context, field) {
+                return Some(context);
             }
-
-            if $func(&left_value, &right_value) {
-                Some(context)
-            } else {
-                None
-            }
-        }))
-    };
+        }
+        f(&left_value, &right_value).then_some(context)
+    }))
 }
 
-macro_rules! implement_negated_filter {
-    ( $iter: ident, $right: ident, $func: ident ) => {
-        Box::new($iter.filter_map(move |mut context| {
-            let right_value = context.values.pop().unwrap();
-            let left_value = context.values.pop().unwrap();
-            if let Argument::Tag(field) = &$right {
-                if is_tag_optional_and_missing(&context, field) {
-                    return Some(context);
-                }
-            }
-
-            if $func(&left_value, &right_value) {
-                None
-            } else {
-                Some(context)
-            }
-        }))
-    };
+fn not<'query>(
+    mut f: impl for<'a> FnMut(&'a FieldValue, &'a FieldValue) -> bool + 'query,
+) -> impl for<'a> FnMut(&'a FieldValue, &'a FieldValue) -> bool + 'query {
+    move |l, r| !f(l, r)
 }
 
 fn apply_filter<
@@ -567,58 +536,34 @@ fn apply_filter<
             });
             Box::new(output_iter)
         }
-        Operation::Equals(_, right) => {
-            implement_filter!(expression_iterator, right, equals)
-        }
-        Operation::NotEquals(_, right) => {
-            implement_negated_filter!(expression_iterator, right, equals)
-        }
-        Operation::GreaterThan(_, right) => {
-            implement_filter!(expression_iterator, right, greater_than)
-        }
+        Operation::Equals(_, right) => filter_map(expression_iterator, right, equals),
+        Operation::NotEquals(_, right) => filter_map(expression_iterator, right, not(equals)),
+        Operation::GreaterThan(_, right) => filter_map(expression_iterator, right, greater_than),
         Operation::GreaterThanOrEqual(_, right) => {
-            implement_filter!(expression_iterator, right, greater_than_or_equal)
+            filter_map(expression_iterator, right, greater_than_or_equal)
         }
-        Operation::LessThan(_, right) => {
-            implement_filter!(expression_iterator, right, less_than)
-        }
+        Operation::LessThan(_, right) => filter_map(expression_iterator, right, less_than),
         Operation::LessThanOrEqual(_, right) => {
-            implement_filter!(expression_iterator, right, less_than_or_equal)
+            filter_map(expression_iterator, right, less_than_or_equal)
         }
-        Operation::HasSubstring(_, right) => {
-            implement_filter!(expression_iterator, right, has_substring)
-        }
+        Operation::HasSubstring(_, right) => filter_map(expression_iterator, right, has_substring),
         Operation::NotHasSubstring(_, right) => {
-            implement_negated_filter!(expression_iterator, right, has_substring)
+            filter_map(expression_iterator, right, not(has_substring))
         }
-        Operation::OneOf(_, right) => {
-            implement_filter!(expression_iterator, right, one_of)
-        }
-        Operation::NotOneOf(_, right) => {
-            implement_negated_filter!(expression_iterator, right, one_of)
-        }
-        Operation::Contains(_, right) => {
-            implement_filter!(expression_iterator, right, contains)
-        }
-        Operation::NotContains(_, right) => {
-            implement_negated_filter!(expression_iterator, right, contains)
-        }
-        Operation::HasPrefix(_, right) => {
-            implement_filter!(expression_iterator, right, has_prefix)
-        }
+        Operation::OneOf(_, right) => filter_map(expression_iterator, right, one_of),
+        Operation::NotOneOf(_, right) => filter_map(expression_iterator, right, not(one_of)),
+        Operation::Contains(_, right) => filter_map(expression_iterator, right, contains),
+        Operation::NotContains(_, right) => filter_map(expression_iterator, right, not(contains)),
+        Operation::HasPrefix(_, right) => filter_map(expression_iterator, right, has_prefix),
         Operation::NotHasPrefix(_, right) => {
-            implement_negated_filter!(expression_iterator, right, has_prefix)
+            filter_map(expression_iterator, right, not(has_prefix))
         }
-        Operation::HasSuffix(_, right) => {
-            implement_filter!(expression_iterator, right, has_suffix)
-        }
+        Operation::HasSuffix(_, right) => filter_map(expression_iterator, right, has_suffix),
         Operation::NotHasSuffix(_, right) => {
-            implement_negated_filter!(expression_iterator, right, has_suffix)
+            filter_map(expression_iterator, right, not(has_suffix))
         }
         Operation::RegexMatches(_, right) => match &right {
-            Argument::Tag(_) => {
-                implement_filter!(expression_iterator, right, regex_matches_slow_path)
-            }
+            Argument::Tag(_) => filter_map(expression_iterator, right, regex_matches_slow_path),
             Argument::Variable(var) => {
                 let variable_value = &query.arguments[var.variable_name.as_ref()];
                 let pattern = Regex::new(variable_value.as_str().unwrap()).unwrap();
@@ -637,7 +582,7 @@ fn apply_filter<
         },
         Operation::NotRegexMatches(_, right) => match &right {
             Argument::Tag(_) => {
-                implement_negated_filter!(expression_iterator, right, regex_matches_slow_path)
+                filter_map(expression_iterator, right, not(regex_matches_slow_path))
             }
             Argument::Variable(var) => {
                 let variable_value = &query.arguments[var.variable_name.as_ref()];
@@ -659,11 +604,9 @@ fn apply_filter<
 }
 struct EdgeExpander<'query, DataToken: Clone + Debug + 'query> {
     context: DataContext<DataToken>,
-    neighbor_tokens: Box<dyn Iterator<Item = DataToken> + 'query>,
+    neighbor_tokens: Option<Box<dyn Iterator<Item = DataToken> + 'query>>,
     is_optional_edge: bool,
     has_neighbors: bool,
-    neighbors_ended: bool,
-    ended: bool,
 }
 
 impl<'query, DataToken: Clone + Debug + 'query> EdgeExpander<'query, DataToken> {
@@ -674,11 +617,9 @@ impl<'query, DataToken: Clone + Debug + 'query> EdgeExpander<'query, DataToken> 
     ) -> EdgeExpander<'query, DataToken> {
         EdgeExpander {
             context,
-            neighbor_tokens,
+            neighbor_tokens: Some(neighbor_tokens),
             is_optional_edge,
             has_neighbors: false,
-            neighbors_ended: false,
-            ended: false,
         }
     }
 }
@@ -687,37 +628,25 @@ impl<'query, DataToken: Clone + Debug + 'query> Iterator for EdgeExpander<'query
     type Item = DataContext<DataToken>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.ended {
-            return None;
+        let neighbor_tokens = self.neighbor_tokens.as_mut()?;
+
+        let neighbor = neighbor_tokens.next();
+        if neighbor.is_some() {
+            self.has_neighbors = true;
+            return Some(self.context.split_and_move_to_token(neighbor));
+        } else {
+            self.neighbor_tokens = None;
         }
 
-        if !self.neighbors_ended {
-            let neighbor = self.neighbor_tokens.next();
-            if neighbor.is_some() {
-                self.has_neighbors = true;
-                return Some(self.context.split_and_move_to_token(neighbor));
-            } else {
-                self.neighbors_ended = true;
-            }
-        }
-
-        assert!(self.neighbors_ended);
-        self.ended = true;
-
-        // If there's no current token, there couldn't possibly be neighbors.
-        // If this assertion trips, the adapter's project_neighbors() implementation illegally
-        // returned neighbors for a non-existent vertex.
         if self.context.current_token.is_none() {
+            // If there's no current token, there couldn't possibly be neighbors.
+            // If this assertion trips, the adapter's project_neighbors() implementation illegally
+            // returned neighbors for a non-existent vertex.
             assert!(!self.has_neighbors);
-        }
-
-        // If the current token is None, that means that a prior edge was optional and missing.
-        // In that case, we couldn't possibly have found any neighbors here, but the optional-ness
-        // of that prior edge means we have to return a context with no active token.
-        //
-        // The other case where we have to return a context with no active token is when
-        // we have a current token, but the edge we're traversing is optional and does not exist.
-        if self.context.current_token.is_none() || (!self.has_neighbors && self.is_optional_edge) {
+            Some(self.context.split_and_move_to_token(None))
+        } else if self.is_optional_edge && !self.has_neighbors {
+            // The edge is optional and we havent returned anything, so
+            // return the empty context
             Some(self.context.split_and_move_to_token(None))
         } else {
             None
@@ -728,9 +657,7 @@ impl<'query, DataToken: Clone + Debug + 'query> Iterator for EdgeExpander<'query
 struct RecursiveEdgeExpander<'query, DataToken: Clone + Debug + 'query> {
     context: Option<DataContext<DataToken>>,
     neighbor_base: Option<DataContext<DataToken>>,
-    neighbor_tokens: Box<dyn Iterator<Item = DataToken> + 'query>,
-    has_neighbors: bool,
-    neighbors_ended: bool,
+    neighbor_tokens: Option<Box<dyn Iterator<Item = DataToken> + 'query>>,
 }
 
 impl<'query, DataToken: Clone + Debug + 'query> RecursiveEdgeExpander<'query, DataToken> {
@@ -741,9 +668,7 @@ impl<'query, DataToken: Clone + Debug + 'query> RecursiveEdgeExpander<'query, Da
         RecursiveEdgeExpander {
             context: Some(context),
             neighbor_base: None,
-            neighbor_tokens,
-            has_neighbors: false,
-            neighbors_ended: false,
+            neighbor_tokens: Some(neighbor_tokens),
         }
     }
 }
@@ -754,8 +679,8 @@ impl<'query, DataToken: Clone + Debug + 'query> Iterator
     type Item = DataContext<DataToken>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.neighbors_ended {
-            let neighbor = self.neighbor_tokens.next();
+        if let Some(neighbor_tokens) = self.neighbor_tokens.as_mut() {
+            let neighbor = neighbor_tokens.next();
 
             if let Some(token) = neighbor {
                 if let Some(context) = self.context.take() {
@@ -781,16 +706,7 @@ impl<'query, DataToken: Clone + Debug + 'query> Iterator
                     );
                 }
             } else {
-                self.neighbors_ended = true;
-
-                // If there's no current token, there couldn't possibly be neighbors.
-                // If this assertion trips, the adapter's project_neighbors() implementation
-                // illegally returned neighbors for a non-existent vertex.
-                if let Some(context) = &self.context {
-                    if context.current_token.is_none() {
-                        assert!(!self.has_neighbors);
-                    }
-                }
+                self.neighbor_tokens = None;
             }
         }
 
@@ -812,8 +728,8 @@ fn unpack_piggyback_inner<DataToken: Debug + Clone>(
     output: &mut Vec<DataContext<DataToken>>,
     mut context: DataContext<DataToken>,
 ) {
-    if let Some(mut piggyback) = context.piggyback.take() {
-        for ctx in piggyback.drain(..) {
+    if let Some(piggyback) = context.piggyback.take() {
+        for ctx in piggyback {
             unpack_piggyback_inner(output, ctx);
         }
     }

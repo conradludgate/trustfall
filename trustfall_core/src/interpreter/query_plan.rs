@@ -22,27 +22,37 @@ pub struct QueryPlan {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ProjectKind {
+    /// Store the value into the value stack
     Values,
+    /// Store the value directly into the imported tags
     ImportedField(FieldRef),
-    Suspend,
 }
+
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum CoerceKind {
+    /// If we cannot coerce, discard the token.
     Filter,
-    // This coercion is unusual since it doesn't discard elements that can't be coerced.
-    // This is because we still want to produce those elements, and we simply want to
-    // not continue recursing deeper through them since they don't have the edge we need.
+    /// If we cannot coerce, suspend the token.
+    ///
+    /// This coercion is unusual since it doesn't discard elements that can't be coerced.
+    /// This is because we still want to produce those elements, and we simply want to
+    /// not continue recursing deeper through them since they don't have the edge we need.
     Suspend,
 }
 
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ExpandKind {
-    Normal {
-        is_optional: bool,
-    },
+    /// Neighbors will be flattened with their parent contexts
+    Required,
+    /// If there are no neighbours, expands once with null for the fields
+    Optional,
+    /// Neighbors will be expanded and the original context will be stored
+    /// in the piggyback. Later, the `RecursionPostProcess` will unpack the piggybacked
+    /// contexts
     Recursive,
+    /// Neighbors will be expanded and collected, rather than flattened
     Fold {
         plan: Vec<QueryPlanItem>,
         tags: Vec<FieldRef>,
@@ -53,19 +63,22 @@ pub enum ExpandKind {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum QueryPlanItem {
+    /// Extract a property's value from the current token
     ProjectProperty {
         type_name: Arc<str>,
         vid: Vid,
         field_name: Arc<str>,
         kind: ProjectKind,
     },
+    /// Try to convert the current value to the new type
     Coerce {
         coerced_from: Arc<str>,
         coerce_to: Arc<str>,
         vid: Vid,
         kind: CoerceKind,
     },
-    Expand {
+    /// Follow the edge from this vertex to find new neighbors
+    Neighbors {
         type_name: Arc<str>,
         edge_name: Arc<str>,
         parameters: Option<Arc<EdgeParameters>>,
@@ -73,15 +86,34 @@ pub enum QueryPlanItem {
         vid: Vid,
         kind: ExpandKind,
     },
-    Argument(Arc<str>),
+
+    /// Take a value from the imported tags and push it onto the value stack
     ImportTag(FieldRef),
-    MoveTo(Vid),
-    FoldCount(Eid),
-    Record(Vid),
-    Activate(Vid),
-    SuspendNone,
+    /// Take the last value in the value stack and push it onto the
+    /// imported tags
     PopIntoImport(FieldRef),
+
+    /// Take the given argument and push it onto the value stack
+    Argument(Arc<str>),
+    /// Save the number of items in the fold to the value stack
+    FoldCount(Eid),
+
+    /// Perform a filtering using the expression, with the last
+    /// value in the stack as the left hand side
     Filter(Operation<(), Argument>),
+
+    /// Record the current token at the given vertex
+    Record(Vid),
+    /// Change the current token to the previously recorded token at
+    /// the given vertex
+    Activate(Vid),
+    /// Change the current token to the previously suspended token
+    Unsuspend,
+    /// If there is no current token, insert an empty token into the suspended
+    /// stack
+    SuspendNone,
+
+    /// Collect the outputs from fold
     FoldOutputs {
         eid: Eid,
         vid: Vid,
@@ -90,6 +122,8 @@ pub enum QueryPlanItem {
         folds: BTreeMap<Eid, Arc<IRFold>>,
         plan: Vec<QueryPlanItem>,
     },
+
+    /// Flatten the output from recursion
     RecursePostProcess,
 }
 
@@ -209,10 +243,14 @@ fn construct_outputs(
     let mut output_names: Vec<Arc<str>> = component.outputs.keys().cloned().collect();
     output_names.sort_unstable(); // to ensure deterministic project_property() ordering
 
-    for output_name in output_names.iter() {
+    let mut last_vertex = None;
+    for output_name in &output_names {
         let context_field = &component.outputs[output_name.as_ref()];
         let vertex_id = context_field.vertex_id;
-        output.push(QueryPlanItem::MoveTo(vertex_id));
+        if last_vertex != Some(vertex_id) {
+            output.push(QueryPlanItem::Activate(vertex_id));
+            last_vertex = Some(vertex_id);
+        }
         output.push(QueryPlanItem::ProjectProperty {
             type_name: component.vertices[&vertex_id].type_name.clone(),
             vid: vertex_id,
@@ -266,7 +304,7 @@ fn compute_fold(
 
     let type_name = expanding_from.type_name.clone();
 
-    output.push(QueryPlanItem::Expand {
+    output.push(QueryPlanItem::Neighbors {
         type_name,
         edge_name: fold.edge_name.clone(),
         parameters: fold.parameters.clone(),
@@ -375,15 +413,16 @@ fn compute_context_field(
     let vertex_id = context_field.vertex_id;
 
     if let Some(vertex) = component.vertices.get(&vertex_id) {
-        output.push(QueryPlanItem::MoveTo(vertex_id));
+        output.push(QueryPlanItem::Activate(vertex_id));
 
         let type_name = vertex.type_name.clone();
         output.push(QueryPlanItem::ProjectProperty {
             type_name,
             vid: vertex_id,
             field_name: context_field.field_name.clone(),
-            kind: ProjectKind::Suspend,
+            kind: ProjectKind::Values,
         });
+        output.push(QueryPlanItem::Unsuspend);
     } else {
         // This context field represents an imported tag value from an outer component.
         // Grab its value from the context itself.
@@ -458,13 +497,17 @@ fn expand_non_recursive_edge(
 ) {
     output.push(QueryPlanItem::Activate(expanding_from.vid));
 
-    output.push(QueryPlanItem::Expand {
+    output.push(QueryPlanItem::Neighbors {
         type_name: expanding_from.type_name.clone(),
         edge_name: edge_name.clone(),
         parameters: edge_parameters.clone(),
         eid: edge_id,
         vid: expanding_from.vid,
-        kind: ExpandKind::Normal { is_optional },
+        kind: if is_optional {
+            ExpandKind::Optional
+        } else {
+            ExpandKind::Required
+        },
     });
 }
 
@@ -544,7 +587,7 @@ fn perform_one_recursive_edge_expansion(
     edge_parameters: &Option<Arc<EdgeParameters>>,
     output: &mut Vec<QueryPlanItem>,
 ) {
-    output.push(QueryPlanItem::Expand {
+    output.push(QueryPlanItem::Neighbors {
         type_name: expanding_from_type,
         edge_name: edge_name.clone(),
         parameters: edge_parameters.clone(),

@@ -128,9 +128,9 @@ where
 }
 
 impl<DataToken: Clone + Debug> DataContext<DataToken> {
-    pub fn new(token: Option<DataToken>) -> DataContext<DataToken> {
+    pub fn new(token: DataToken) -> DataContext<DataToken> {
         DataContext {
-            current_token: token,
+            current_token: Some(token),
             piggyback: None,
             tokens: Default::default(),
             values: Default::default(),
@@ -147,17 +147,9 @@ impl<DataToken: Clone + Debug> DataContext<DataToken> {
             .unwrap();
     }
 
-    fn activate_token(self, vid: &Vid) -> DataContext<DataToken> {
-        DataContext {
-            current_token: self.tokens[vid].clone(),
-            tokens: self.tokens,
-            values: self.values,
-            suspended_tokens: self.suspended_tokens,
-            folded_contexts: self.folded_contexts,
-            folded_values: self.folded_values,
-            piggyback: self.piggyback,
-            imported_tags: self.imported_tags,
-        }
+    fn activate_token(mut self, vid: &Vid) -> DataContext<DataToken> {
+        self.current_token = self.tokens[vid].clone();
+        self
     }
 
     fn split_and_move_to_token(&self, new_token: Option<DataToken>) -> DataContext<DataToken> {
@@ -173,54 +165,23 @@ impl<DataToken: Clone + Debug> DataContext<DataToken> {
         }
     }
 
-    fn move_to_token(self, new_token: Option<DataToken>) -> DataContext<DataToken> {
-        DataContext {
-            current_token: new_token,
-            tokens: self.tokens,
-            values: self.values,
-            suspended_tokens: self.suspended_tokens,
-            folded_contexts: self.folded_contexts,
-            folded_values: self.folded_values,
-            piggyback: self.piggyback,
-            imported_tags: self.imported_tags,
-        }
+    fn unsuspend(mut self) -> DataContext<DataToken> {
+        self.current_token = self.suspended_tokens.pop().unwrap();
+        self
     }
 
     fn ensure_suspended(mut self) -> DataContext<DataToken> {
-        if let Some(token) = self.current_token {
+        if let Some(token) = self.current_token.take() {
             self.suspended_tokens.push(Some(token));
-            DataContext {
-                current_token: None,
-                tokens: self.tokens,
-                values: self.values,
-                suspended_tokens: self.suspended_tokens,
-                folded_contexts: self.folded_contexts,
-                folded_values: self.folded_values,
-                piggyback: self.piggyback,
-                imported_tags: self.imported_tags,
-            }
-        } else {
-            self
         }
+        self
     }
 
     fn ensure_unsuspended(mut self) -> DataContext<DataToken> {
-        match self.current_token {
-            None => {
-                let current_token = self.suspended_tokens.pop().unwrap();
-                DataContext {
-                    current_token,
-                    tokens: self.tokens,
-                    values: self.values,
-                    suspended_tokens: self.suspended_tokens,
-                    folded_contexts: self.folded_contexts,
-                    folded_values: self.folded_values,
-                    piggyback: self.piggyback,
-                    imported_tags: self.imported_tags,
-                }
-            }
-            Some(_) => self,
-        }
+        self.current_token = self
+            .current_token
+            .or_else(|| self.suspended_tokens.pop().unwrap());
+        self
     }
 }
 
