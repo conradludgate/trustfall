@@ -10,10 +10,12 @@ use syn::{
 use trustfall_core::{
     frontend::parse,
     interpreter::{
-        query_plan::{query_plan, CoerceKind, ExpandKind, QueryPlan, QueryPlanItem},
+        query_plan::{
+            query_plan, CoerceKind, ExpandKind, QueryPlan, QueryPlanItem, SimpleArgument,
+        },
         FieldRef,
     },
-    ir::{Eid, FoldSpecificFieldKind, Vid},
+    ir::{Eid, FoldSpecificFieldKind, Operation, Vid},
     schema::Schema,
 };
 
@@ -128,7 +130,7 @@ impl ToTokens for Output {
         tokens.extend(quote!(
             impl #typ {
                 fn query(&self) -> impl ::std::iter::Iterator<Item = ::std::collections::BTreeMap<
-                        ::std::sync::Arc<str>, 
+                        ::std::sync::Arc<str>,
                         ::trustfall_core::ir::value::FieldValue
                     >> + '_ {
                     #block
@@ -287,7 +289,6 @@ impl ToTokens for BuildPlan<'_> {
                         let iter = ::trustfall_core::interpreter::executer_components::fold_count(iter, #eid);
                     ))
                 }
-                QueryPlanItem::Filter(_) => {}
                 QueryPlanItem::Record(vid) => {
                     let vid = VidToken(*vid);
                     tokens.extend(quote!(
@@ -372,6 +373,12 @@ impl ToTokens for BuildPlan<'_> {
                         let iter = ::trustfall_core::interpreter::executer_components::post_process_recursive_expansion(iter);
                     ))
                 }
+                QueryPlanItem::Filter(arg) => {
+                    let filter = Filter(arg);
+                    tokens.extend(quote!(
+                        let iter = #filter;
+                    ))
+                }
                 _ => unimplemented!()
             }
         }
@@ -430,6 +437,71 @@ impl ToTokens for FieldRefToken<'_> {
                     )),
                     _ => unimplemented!(),
                 }
+            }
+        }
+    }
+}
+
+struct Filter<'a>(&'a Operation<(), SimpleArgument>);
+
+impl ToTokens for Filter<'_> {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        match self.0 {
+            Operation::IsNull(_) => tokens.extend(quote!(
+                ::trustfall_core::interpreter::executer_components::filter::is_null(iter)
+            )),
+            Operation::IsNotNull(_) => tokens.extend(quote!(
+                ::trustfall_core::interpreter::executer_components::filter::is_not_null(iter)
+            )),
+            Operation::Equals(_, right) => filter(tokens, "equals", right),
+            Operation::NotEquals(_, right) => filter(tokens, "not_equals", right),
+            Operation::LessThan(_, right) => filter(tokens, "less_than", right),
+            Operation::LessThanOrEqual(_, right) => filter(tokens, "less_than_or_equal", right),
+            Operation::GreaterThan(_, right) => filter(tokens, "greater_than", right),
+            Operation::GreaterThanOrEqual(_, right) => {
+                filter(tokens, "greater_than_or_equal", right)
+            }
+            Operation::Contains(_, right) => filter(tokens, "contains", right),
+            Operation::NotContains(_, right) => filter(tokens, "not_contains", right),
+            Operation::OneOf(_, right) => filter(tokens, "one_of", right),
+            Operation::NotOneOf(_, right) => filter(tokens, "not_one_of", right),
+            Operation::HasPrefix(_, right) => filter(tokens, "has_prefix", right),
+            Operation::NotHasPrefix(_, right) => filter(tokens, "not_has_prefix", right),
+            Operation::HasSuffix(_, right) => filter(tokens, "has_suffix", right),
+            Operation::NotHasSuffix(_, right) => filter(tokens, "not_has_suffix", right),
+            Operation::HasSubstring(_, right) => filter(tokens, "has_substring", right),
+            Operation::NotHasSubstring(_, right) => filter(tokens, "not_has_substring", right),
+
+            _ => todo!(),
+        }
+    }
+}
+
+fn filter(tokens: &mut proc_macro2::TokenStream, name: &str, arg: &SimpleArgument) {
+    let name = format_ident!("{name}");
+    let arg = Arg(arg);
+    tokens.extend(quote!(
+        ::trustfall_core::interpreter::executer_components::filter::#name(iter, #arg);
+    ));
+}
+
+struct Arg<'a>(&'a SimpleArgument);
+impl ToTokens for Arg<'_> {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        match self.0 {
+            SimpleArgument::Tag(t) => {
+                let vid = VidToken(*t);
+                tokens.extend(quote!(
+                    trustfall_core::interpreter::query_plan::SimpleArgument::Tag(#vid)
+                ));
+            }
+            SimpleArgument::Variable(v) => {
+                let v = v.as_ref();
+                tokens.extend(quote!(
+                    trustfall_core::interpreter::query_plan::SimpleArgument::Variable(
+                        ::std::sync::Arc::from(#v)
+                    )
+                ));
             }
         }
     }

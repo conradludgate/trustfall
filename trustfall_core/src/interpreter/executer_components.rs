@@ -1,17 +1,6 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Debug,
-    sync::Arc,
-};
-
-use regex::Regex;
+use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 
 use crate::{
-    interpreter::filtering::{
-        contains, equals, greater_than, greater_than_or_equal, has_prefix, has_substring,
-        has_suffix, less_than, less_than_or_equal, one_of, regex_matches_optimized,
-        regex_matches_slow_path,
-    },
     ir::{Eid, FieldValue, FoldSpecificFieldKind, Operation, Vid},
     util::BTreeMapTryInsertExt,
 };
@@ -372,141 +361,107 @@ pub fn collect_fold_elements<'query, DataToken: Clone + Debug + 'query>(
     Some(fold_elements)
 }
 
-/// Check whether a tagged value that is being used in a filter originates from
-/// a scope that is optional and missing, and therefore the filter should pass.
-///
-/// A small subtlety is important here: it's possible that the tagged value is *local* to
-/// the scope being filtered. In that case, the context *will not* yet have a token associated
-/// with the [Vid] of the tag's ContextField. However, in such cases, the tagged value
-/// is *never* optional relative to the current scope, so we can safely return `false`.
-#[inline(always)]
-fn is_tag_optional_and_missing<'query, DataToken: Clone + Debug + 'query>(
-    context: &DataContext<DataToken>,
-    vid: Vid,
-) -> bool {
-    // Some(None) means "there's a value associated with that Vid, and it's None".
-    // None would mean that the tagged value is local, i.e. nothing is associated with that Vid yet.
-    // Some(Some(token)) would mean that a vertex was found and associated with that Vid.
-    matches!(context.tokens.get(&vid), Some(None))
-}
+pub mod filter {
+    use std::fmt::Debug;
 
-fn filter_map<'query, DataToken: Clone + Debug + 'query>(
-    expression_iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-    right: SimpleArgument,
-    mut f: impl for<'a> FnMut(&'a FieldValue, &'a FieldValue) -> bool + 'query,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    Box::new(expression_iterator.filter_map(move |mut context| {
-        let right_value = context.values.pop().unwrap();
-        let left_value = context.values.pop().unwrap();
-        if let SimpleArgument::Tag(vid) = &right {
-            if is_tag_optional_and_missing(&context, *vid) {
-                return Some(context);
-            }
-        }
-        f(&left_value, &right_value).then_some(context)
-    }))
-}
+    use crate::{
+        interpreter::filtering as f,
+        interpreter::{query_plan::SimpleArgument, DataContext},
+        ir::{FieldValue, Vid},
+    };
 
-fn not<'query>(
-    mut f: impl for<'a> FnMut(&'a FieldValue, &'a FieldValue) -> bool + 'query,
-) -> impl for<'a> FnMut(&'a FieldValue, &'a FieldValue) -> bool + 'query {
-    move |l, r| !f(l, r)
-}
-
-fn apply_filter<'query, DataToken: Clone + Debug + 'query>(
-    query: &InterpretedQuery,
-    filter: Operation<(), SimpleArgument>,
-    expression_iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    match filter {
-        Operation::IsNull(_) => {
-            let output_iter = expression_iterator.filter_map(move |mut context| {
-                let last_value = context.values.pop().unwrap();
-                match last_value {
-                    FieldValue::Null => Some(context),
-                    _ => None,
-                }
-            });
-            Box::new(output_iter)
-        }
-        Operation::IsNotNull(_) => {
-            let output_iter = expression_iterator.filter_map(move |mut context| {
-                let last_value = context.values.pop().unwrap();
-                match last_value {
-                    FieldValue::Null => None,
-                    _ => Some(context),
-                }
-            });
-            Box::new(output_iter)
-        }
-        Operation::Equals(_, right) => filter_map(expression_iterator, right, equals),
-        Operation::NotEquals(_, right) => filter_map(expression_iterator, right, not(equals)),
-        Operation::GreaterThan(_, right) => filter_map(expression_iterator, right, greater_than),
-        Operation::GreaterThanOrEqual(_, right) => {
-            filter_map(expression_iterator, right, greater_than_or_equal)
-        }
-        Operation::LessThan(_, right) => filter_map(expression_iterator, right, less_than),
-        Operation::LessThanOrEqual(_, right) => {
-            filter_map(expression_iterator, right, less_than_or_equal)
-        }
-        Operation::HasSubstring(_, right) => filter_map(expression_iterator, right, has_substring),
-        Operation::NotHasSubstring(_, right) => {
-            filter_map(expression_iterator, right, not(has_substring))
-        }
-        Operation::OneOf(_, right) => filter_map(expression_iterator, right, one_of),
-        Operation::NotOneOf(_, right) => filter_map(expression_iterator, right, not(one_of)),
-        Operation::Contains(_, right) => filter_map(expression_iterator, right, contains),
-        Operation::NotContains(_, right) => filter_map(expression_iterator, right, not(contains)),
-        Operation::HasPrefix(_, right) => filter_map(expression_iterator, right, has_prefix),
-        Operation::NotHasPrefix(_, right) => {
-            filter_map(expression_iterator, right, not(has_prefix))
-        }
-        Operation::HasSuffix(_, right) => filter_map(expression_iterator, right, has_suffix),
-        Operation::NotHasSuffix(_, right) => {
-            filter_map(expression_iterator, right, not(has_suffix))
-        }
-        Operation::RegexMatches(_, right) => match &right {
-            SimpleArgument::Tag(_) => {
-                filter_map(expression_iterator, right, regex_matches_slow_path)
-            }
-            SimpleArgument::Variable(var) => {
-                let variable_value = &query.arguments[var.as_ref()];
-                let pattern = Regex::new(variable_value.as_str().unwrap()).unwrap();
-
-                Box::new(expression_iterator.filter_map(move |mut context| {
-                    let _ = context.values.pop().unwrap();
-                    let left_value = context.values.pop().unwrap();
-
-                    if regex_matches_optimized(&left_value, &pattern) {
-                        Some(context)
-                    } else {
-                        None
-                    }
-                }))
-            }
-        },
-        Operation::NotRegexMatches(_, right) => match &right {
-            SimpleArgument::Tag(_) => {
-                filter_map(expression_iterator, right, not(regex_matches_slow_path))
-            }
-            SimpleArgument::Variable(var) => {
-                let variable_value = &query.arguments[var.as_ref()];
-                let pattern = Regex::new(variable_value.as_str().unwrap()).unwrap();
-
-                Box::new(expression_iterator.filter_map(move |mut context| {
-                    let _ = context.values.pop().unwrap();
-                    let left_value = context.values.pop().unwrap();
-
-                    if !regex_matches_optimized(&left_value, &pattern) {
-                        Some(context)
-                    } else {
-                        None
-                    }
-                }))
-            }
-        },
+    /// Check whether a tagged value that is being used in a filter originates from
+    /// a scope that is optional and missing, and therefore the filter should pass.
+    ///
+    /// A small subtlety is important here: it's possible that the tagged value is *local* to
+    /// the scope being filtered. In that case, the context *will not* yet have a token associated
+    /// with the [Vid] of the tag's ContextField. However, in such cases, the tagged value
+    /// is *never* optional relative to the current scope, so we can safely return `false`.
+    #[inline(always)]
+    fn is_tag_optional_and_missing<'query, DataToken: Clone + Debug + 'query>(
+        context: &DataContext<DataToken>,
+        vid: Vid,
+    ) -> bool {
+        // Some(None) means "there's a value associated with that Vid, and it's None".
+        // None would mean that the tagged value is local, i.e. nothing is associated with that Vid yet.
+        // Some(Some(token)) would mean that a vertex was found and associated with that Vid.
+        matches!(context.tokens.get(&vid), Some(None))
     }
+
+    fn filter_map<'query, DataToken: Clone + Debug + 'query>(
+        i: impl Iterator<Item = DataContext<DataToken>> + 'query,
+        arg: SimpleArgument,
+        mut f: impl for<'a> FnMut(&'a FieldValue, &'a FieldValue) -> bool + 'query,
+    ) -> impl Iterator<Item = DataContext<DataToken>> + 'query {
+        i.filter_map(move |mut context| {
+            let right_value = context.values.pop().unwrap();
+            let left_value = context.values.pop().unwrap();
+            if let SimpleArgument::Tag(vid) = &arg {
+                if is_tag_optional_and_missing(&context, *vid) {
+                    return Some(context);
+                }
+            }
+            f(&left_value, &right_value).then_some(context)
+        })
+    }
+
+    fn not<'query>(
+        mut f: impl for<'a> FnMut(&'a FieldValue, &'a FieldValue) -> bool + 'query,
+    ) -> impl for<'a> FnMut(&'a FieldValue, &'a FieldValue) -> bool + 'query {
+        move |l, r| !f(l, r)
+    }
+
+    pub fn is_null<'query, DataToken: Clone + Debug + 'query>(
+        i: impl Iterator<Item = DataContext<DataToken>> + 'query,
+    ) -> impl Iterator<Item = DataContext<DataToken>> + 'query {
+        i.filter_map(move |mut ctx| {
+            let last_value = ctx.values.pop().unwrap();
+            match last_value {
+                FieldValue::Null => Some(ctx),
+                _ => None,
+            }
+        })
+    }
+    pub fn is_not_null<'query, DataToken: Clone + Debug + 'query>(
+        i: impl Iterator<Item = DataContext<DataToken>> + 'query,
+    ) -> impl Iterator<Item = DataContext<DataToken>> + 'query {
+        i.filter_map(move |mut ctx| {
+            let last_value = ctx.values.pop().unwrap();
+            match last_value {
+                FieldValue::Null => None,
+                _ => Some(ctx),
+            }
+        })
+    }
+
+    macro_rules! fm {
+        ($n:ident, $e:expr) => {
+            pub fn $n<'query, DataToken: Clone + Debug + 'query>(
+                i: impl Iterator<Item = DataContext<DataToken>> + 'query,
+                arg: SimpleArgument,
+            ) -> impl Iterator<Item = DataContext<DataToken>> + 'query {
+                filter_map(i, arg, $e)
+            }
+        };
+    }
+    fm!(equals, f::equals);
+    fm!(not_equals, not(f::equals));
+    fm!(greater_than, f::greater_than);
+    fm!(greater_than_or_equal, f::greater_than_or_equal);
+    fm!(less_than, f::less_than);
+    fm!(less_than_or_equal, f::less_than_or_equal);
+    fm!(has_substring, f::has_substring);
+    fm!(not_has_substring, not(f::has_substring));
+    fm!(one_of, f::one_of);
+    fm!(not_one_of, not(f::one_of));
+    fm!(contains, f::contains);
+    fm!(not_contains, not(f::contains));
+    fm!(has_prefix, f::has_prefix);
+    fm!(not_has_prefix, not(f::has_prefix));
+    fm!(has_suffix, f::has_suffix);
+    fm!(not_has_suffix, not(f::has_suffix));
 }
+
 struct EdgeExpander<I: Iterator>
 where
     I::Item: Clone + Debug,

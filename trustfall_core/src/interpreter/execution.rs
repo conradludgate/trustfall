@@ -4,11 +4,7 @@ use dbg_pls::color;
 use regex::Regex;
 
 use crate::{
-    interpreter::filtering::{
-        contains, equals, greater_than, greater_than_or_equal, has_prefix, has_substring,
-        has_suffix, less_than, less_than_or_equal, one_of, regex_matches_optimized,
-        regex_matches_slow_path,
-    },
+    interpreter::filtering::{regex_matches_optimized, regex_matches_slow_path},
     ir::{indexed::IndexedQuery, Eid, FieldValue, Operation, Vid},
 };
 
@@ -301,64 +297,35 @@ fn not<'query>(
 fn apply_filter<'query, DataToken: Clone + Debug + 'query>(
     query: &InterpretedQuery,
     filter: Operation<(), SimpleArgument>,
-    expression_iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
+    i: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
 ) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
+    use executer_components::filter as f;
     match filter {
-        Operation::IsNull(_) => {
-            let output_iter = expression_iterator.filter_map(move |mut context| {
-                let last_value = context.values.pop().unwrap();
-                match last_value {
-                    FieldValue::Null => Some(context),
-                    _ => None,
-                }
-            });
-            Box::new(output_iter)
-        }
-        Operation::IsNotNull(_) => {
-            let output_iter = expression_iterator.filter_map(move |mut context| {
-                let last_value = context.values.pop().unwrap();
-                match last_value {
-                    FieldValue::Null => None,
-                    _ => Some(context),
-                }
-            });
-            Box::new(output_iter)
-        }
-        Operation::Equals(_, right) => filter_map(expression_iterator, right, equals),
-        Operation::NotEquals(_, right) => filter_map(expression_iterator, right, not(equals)),
-        Operation::GreaterThan(_, right) => filter_map(expression_iterator, right, greater_than),
-        Operation::GreaterThanOrEqual(_, right) => {
-            filter_map(expression_iterator, right, greater_than_or_equal)
-        }
-        Operation::LessThan(_, right) => filter_map(expression_iterator, right, less_than),
-        Operation::LessThanOrEqual(_, right) => {
-            filter_map(expression_iterator, right, less_than_or_equal)
-        }
-        Operation::HasSubstring(_, right) => filter_map(expression_iterator, right, has_substring),
-        Operation::NotHasSubstring(_, right) => {
-            filter_map(expression_iterator, right, not(has_substring))
-        }
-        Operation::OneOf(_, right) => filter_map(expression_iterator, right, one_of),
-        Operation::NotOneOf(_, right) => filter_map(expression_iterator, right, not(one_of)),
-        Operation::Contains(_, right) => filter_map(expression_iterator, right, contains),
-        Operation::NotContains(_, right) => filter_map(expression_iterator, right, not(contains)),
-        Operation::HasPrefix(_, right) => filter_map(expression_iterator, right, has_prefix),
-        Operation::NotHasPrefix(_, right) => {
-            filter_map(expression_iterator, right, not(has_prefix))
-        }
-        Operation::HasSuffix(_, right) => filter_map(expression_iterator, right, has_suffix),
-        Operation::NotHasSuffix(_, right) => {
-            filter_map(expression_iterator, right, not(has_suffix))
-        }
+        Operation::IsNull(_) => Box::new(f::is_null(i)),
+        Operation::IsNotNull(_) => Box::new(f::is_not_null(i)),
+        Operation::Equals(_, right) => Box::new(f::equals(i, right)),
+        Operation::NotEquals(_, right) => Box::new(f::not_equals(i, right)),
+        Operation::GreaterThan(_, right) => Box::new(f::greater_than(i, right)),
+        Operation::GreaterThanOrEqual(_, right) => Box::new(f::greater_than_or_equal(i, right)),
+        Operation::LessThan(_, right) => Box::new(f::less_than(i, right)),
+        Operation::LessThanOrEqual(_, right) => Box::new(f::less_than_or_equal(i, right)),
+        Operation::HasSubstring(_, right) => Box::new(f::has_substring(i, right)),
+        Operation::NotHasSubstring(_, right) => Box::new(f::not_has_substring(i, right)),
+        Operation::OneOf(_, right) => Box::new(f::one_of(i, right)),
+        Operation::NotOneOf(_, right) => Box::new(f::not_one_of(i, right)),
+        Operation::Contains(_, right) => Box::new(f::contains(i, right)),
+        Operation::NotContains(_, right) => Box::new(f::not_contains(i, right)),
+        Operation::HasPrefix(_, right) => Box::new(f::has_prefix(i, right)),
+        Operation::NotHasPrefix(_, right) => Box::new(f::not_has_prefix(i, right)),
+        Operation::HasSuffix(_, right) => Box::new(f::has_suffix(i, right)),
+        Operation::NotHasSuffix(_, right) => Box::new(f::not_has_suffix(i, right)),
         Operation::RegexMatches(_, right) => match &right {
-            SimpleArgument::Tag(_) => {
-                filter_map(expression_iterator, right, regex_matches_slow_path)
-            }
+            SimpleArgument::Tag(_) => filter_map(i, right, regex_matches_slow_path),
             SimpleArgument::Variable(var) => {
                 let variable_value = &query.arguments[var.as_ref()];
                 let pattern = Regex::new(variable_value.as_str().unwrap()).unwrap();
 
-                Box::new(expression_iterator.filter_map(move |mut context| {
+                Box::new(i.filter_map(move |mut context| {
                     let _ = context.values.pop().unwrap();
                     let left_value = context.values.pop().unwrap();
 
@@ -371,14 +338,12 @@ fn apply_filter<'query, DataToken: Clone + Debug + 'query>(
             }
         },
         Operation::NotRegexMatches(_, right) => match &right {
-            SimpleArgument::Tag(_) => {
-                filter_map(expression_iterator, right, not(regex_matches_slow_path))
-            }
+            SimpleArgument::Tag(_) => filter_map(i, right, not(regex_matches_slow_path)),
             SimpleArgument::Variable(var) => {
                 let variable_value = &query.arguments[var.as_ref()];
                 let pattern = Regex::new(variable_value.as_str().unwrap()).unwrap();
 
-                Box::new(expression_iterator.filter_map(move |mut context| {
+                Box::new(i.filter_map(move |mut context| {
                     let _ = context.values.pop().unwrap();
                     let left_value = context.values.pop().unwrap();
 
