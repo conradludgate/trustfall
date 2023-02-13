@@ -87,7 +87,8 @@ pub struct ContextField {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum ValueOrVec {
+#[doc(hidden)]
+pub enum ValueOrVec {
     Value(FieldValue),
     Vec(Vec<ValueOrVec>),
 }

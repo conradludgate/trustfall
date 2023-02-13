@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use serde::Deserialize;
+use trustfall_core::interpreter::query_plan::query_plan;
 use trustfall_core::ir::TransparentValue;
 use trustfall_core::{
     frontend::parse, interpreter::execution::interpret_ir, ir::FieldValue, schema::Schema,
@@ -37,6 +38,9 @@ fn execute_query(path: &str) {
     let adapter = Rc::new(HackerNewsAdapter);
 
     let query = parse(&SCHEMA, input_query.query).unwrap();
+
+    dbg!(query_plan(query.clone()));
+
     let arguments = input_query.args;
 
     for data_item in interpret_ir(adapter, query, arguments).unwrap() {

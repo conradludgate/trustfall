@@ -7,6 +7,7 @@ use std::{
 
 use async_graphql_parser::types::Type;
 use dbg_pls::DebugPls;
+use itertools::Itertools;
 
 use crate::ir::{
     indexed::{EdgeKind, IndexedQuery},
@@ -124,7 +125,7 @@ pub enum QueryPlanItem {
         vid: Vid,
         output_names: Vec<Arc<str>>,
         fold_specific_outputs: BTreeMap<Arc<str>, FoldSpecificFieldKind>,
-        folded_keys: BTreeSet<(Eid, Arc<str>)>,
+        folded_keys: Vec<(Eid, Arc<str>)>,
         plan: Vec<QueryPlanItem>,
     },
 
@@ -337,6 +338,8 @@ fn compute_fold(
         }
         queue.extend(inner_fold.component.folds.values());
     }
+
+    let folded_keys = folded_keys.into_iter().collect_vec();
 
     output.push(QueryPlanItem::FoldOutputs {
         eid: fold.eid,

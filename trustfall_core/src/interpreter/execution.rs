@@ -4,16 +4,12 @@ use dbg_pls::color;
 use regex::Regex;
 
 use crate::{
-    interpreter::{
-        filtering::{
-            contains, equals, greater_than, greater_than_or_equal, has_prefix, has_substring,
-            has_suffix, less_than, less_than_or_equal, one_of, regex_matches_optimized,
-            regex_matches_slow_path,
-        },
-        ValueOrVec,
+    interpreter::filtering::{
+        contains, equals, greater_than, greater_than_or_equal, has_prefix, has_substring,
+        has_suffix, less_than, less_than_or_equal, one_of, regex_matches_optimized,
+        regex_matches_slow_path,
     },
-    ir::{indexed::IndexedQuery, Eid, FieldValue, FoldSpecificFieldKind, Operation, Vid},
-    util::BTreeMapTryInsertExt,
+    ir::{indexed::IndexedQuery, Eid, FieldValue, Operation, Vid},
 };
 
 use super::{
@@ -174,82 +170,32 @@ where
         } => {
             let query = query.clone();
             let iterator = iterator.map(move |mut ctx| {
-                // If the @fold is inside an @optional that doesn't exist,
-                // its outputs should be `null` rather than empty lists (the usual for empty folds).
-                // Transformed outputs should also be `null` rather than their usual transformed defaults.
-                let did_fold_root_exist = ctx.tokens[&vid].is_some();
-                let default_value = did_fold_root_exist.then_some(ValueOrVec::Vec(Vec::new()));
+                let extract = executer_components::extract_folded_context(
+                    &mut ctx,
+                    eid,
+                    vid,
+                    &fold_specific_outputs,
+                    &output_names,
+                    &folded_keys,
+                );
 
-                let fold_elements = ctx.folded_contexts.get(&eid).unwrap();
-
-                // Add any fold-specific field outputs to the context's folded values.
-                for (output_name, fold_specific_field) in &fold_specific_outputs {
-                    let value = match fold_specific_field {
-                        FoldSpecificFieldKind::Count => {
-                            ValueOrVec::Value(FieldValue::Uint64(fold_elements.len() as u64))
-                        }
-                    };
-                    ctx.folded_values
-                        .insert_or_error(
-                            (eid, output_name.clone()),
-                            did_fold_root_exist.then_some(value),
-                        )
-                        .unwrap();
-                }
-
-                // Prepare empty vectors for all the outputs from this @fold component.
-                // If the fold-root vertex didn't exist, the default is `null` instead.
-                let mut folded_values: BTreeMap<(Eid, Arc<str>), Option<ValueOrVec>> = output_names
-                    .iter()
-                    .map(|output| ((eid, output.clone()), default_value.clone()))
-                    .collect();
-
-                // Don't bother trying to resolve property values on this @fold when it's empty.
-                // Skip the adapter project_property() calls and add the empty output values directly.
-                if fold_elements.is_empty() {
-                    // We need to make sure any outputs from any nested @fold components (recursively)
-                    // are set to empty lists.
-                    for key in &folded_keys {
-                        folded_values.insert(key.clone(), default_value.clone());
-                    }
-                } else {
+                if let Some((folded_values, fold_elements)) = extract {
                     let output_iterator = build_plan(
                         adapter.clone(),
                         &query,
                         plan.clone(),
-                        Box::new(fold_elements.clone().into_iter()),
+                        Box::new(fold_elements.into_iter()),
                     );
 
-                    for mut folded_context in output_iterator {
-                        for (key, value) in folded_context.folded_values {
-                            folded_values
-                                .entry(key)
-                                .or_insert_with(|| Some(ValueOrVec::Vec(vec![])))
-                                .as_mut()
-                                .expect("not Some")
-                                .as_mut_vec()
-                                .expect("not a Vec")
-                                .push(value.unwrap_or(ValueOrVec::Value(FieldValue::Null)));
-                        }
-
-                        // We pushed values onto folded_context.values with output names in increasing order
-                        // and we are now popping from the back. That means we're getting the highest name
-                        // first, so we should reverse our output_names iteration order.
-                        for output in output_names.iter().rev() {
-                            let value = folded_context.values.pop().unwrap();
-                            folded_values
-                                .get_mut(&(eid, output.clone()))
-                                .expect("key not present")
-                                .as_mut()
-                                .expect("value was None")
-                                .as_mut_vec()
-                                .expect("not a Vec")
-                                .push(ValueOrVec::Value(value));
-                        }
-                    }
+                    executer_components::store_folded_values(
+                        output_iterator,
+                        &mut ctx,
+                        folded_values,
+                        &output_names,
+                        eid,
+                    );
                 };
 
-                ctx.folded_values.extend(folded_values);
                 ctx
             });
             Box::new(iterator)
@@ -280,27 +226,16 @@ where
                 executer_components::get_max_fold_count_limit(query, &post_fold_filters);
             let query = query.clone();
             let folded_iterator = iter.filter_map(move |(mut context, neighbors)| {
-                let imported_tags = context.imported_tags.clone();
-
-                let neighbor_contexts = Box::new(neighbors.map(move |x| {
-                    let mut ctx = DataContext::new(x);
-                    ctx.imported_tags = imported_tags.clone();
-                    ctx
-                }));
+                let neighbor_contexts = Box::new(executer_components::neighbors_import_tags(
+                    neighbors, &context,
+                ));
 
                 let computed_iterator =
                     build_plan(adapter.clone(), &query, plan.clone(), neighbor_contexts);
 
                 let fold_elements = collect_fold_elements(computed_iterator, &max_fold_size)?;
-                context
-                    .folded_contexts
-                    .insert_or_error(eid, fold_elements)
-                    .unwrap();
 
-                // Remove no-longer-needed imported tags.
-                for imported_tag in &tags {
-                    context.imported_tags.remove(imported_tag).unwrap();
-                }
+                executer_components::store_folded(&mut context, eid, fold_elements, &tags);
 
                 Some(context)
             });

@@ -7,10 +7,12 @@ use std::time::{Duration, Instant};
 
 use adapter::DemoAdapter;
 use serde::Deserialize;
+use trustfall_core::interpreter::query_plan::query_plan;
 use trustfall_core::ir::TransparentValue;
 use trustfall_core::{
     frontend::parse, interpreter::execution::interpret_ir, ir::FieldValue, schema::Schema,
 };
+use trustfall_macros::compile_query;
 
 #[macro_use]
 extern crate lazy_static;
@@ -25,6 +27,40 @@ lazy_static! {
     static ref SCHEMA: Schema =
         Schema::parse(fs::read_to_string("./schema.graphql").unwrap()).unwrap();
 }
+
+compile_query!(
+    DemoAdapter,
+    "demo-hytradboi/schema.graphql",
+    r#"{
+    HackerNewsTop(max: 200) {
+        ... on HackerNewsStory {
+        hn_score: score @filter(op: ">=", value: ["$min_score"]) @output
+    
+        link {
+            ... on GitHubRepository {
+            repo_url: url @output
+    
+            workflows {
+                workflow: name @output
+                workflow_path: path @output
+    
+                jobs {
+                job: name @output
+    
+                step {
+                    ... on GitHubActionsImportedStep {
+                    step: name @output
+                    action: uses @output
+                    }
+                }
+                }
+            }
+            }
+        }
+        }
+    }
+}"#
+);
 
 #[derive(Debug, Clone, Deserialize)]
 struct InputQuery<'a> {
@@ -46,6 +82,8 @@ fn execute_query(path: &str) {
 
     println!("Executing query:");
     println!("{}", input_query.query.trim());
+
+    dbg!(query_plan(query.clone()));
 
     // Printing "prettily" (without the enum wrapper that captures the value type)
     // unfortunately takes a bit of ceremony at the moment.

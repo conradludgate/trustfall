@@ -10,7 +10,7 @@ use syn::{
 use trustfall_core::{
     frontend::parse,
     interpreter::{
-        query_plan::{query_plan, CoerceKind, QueryPlan, QueryPlanItem},
+        query_plan::{query_plan, CoerceKind, ExpandKind, QueryPlan, QueryPlanItem},
         FieldRef,
     },
     ir::{Eid, FoldSpecificFieldKind, Vid},
@@ -107,24 +107,30 @@ impl ToTokens for Output {
         ));
 
         // get_starting_tokens
-        let edge_name = format_ident!("{edge}");
+        let edge_name = format_ident!("{edge}_roots");
         let vid = VidToken(*vid);
         block.extend(quote!(
-            let iter = <#typ>::#edge_name(self, #vid);
+            let iter = <#typ>::#edge_name(self, #vid).map(|x| ::trustfall_core::interpreter::DataContext::new(x));
         ));
 
         BuildPlan {
-            typ: &typ,
+            typ,
             plan: plan.as_slice(),
         }
         .to_tokens(&mut block);
 
-        tokens.extend(quote!(
-            struct Arguments;
-            struct Output;
+        let outputs = outputs.iter().map(|s| s.as_ref());
+        block.extend(quote!(
+            let outputs = vec![#(::std::sync::Arc::from(#outputs)),*];
+            ::trustfall_core::interpreter::executer_components::collect_outputs(iter, outputs)
+        ));
 
+        tokens.extend(quote!(
             impl #typ {
-                fn query(&self, arguments: Arguments) -> impl std::iter::Iterator<Item = Output> {
+                fn query(&self) -> impl ::std::iter::Iterator<Item = ::std::collections::BTreeMap<
+                        ::std::sync::Arc<str>, 
+                        ::trustfall_core::ir::value::FieldValue
+                    >> + '_ {
                     #block
                 }
             }
@@ -149,7 +155,7 @@ impl ToTokens for BuildPlan<'_> {
                     vid,
                     field_name,
                 } => {
-                    let field_name = format_ident!("{field_name}");
+                    let field_name = format_ident!("{field_name}_property");
                     // let type_name = format_ident!("{type_name}");
                     // let field_name = field_name.as_ref();
                     let type_name = type_name.as_ref();
@@ -196,7 +202,7 @@ impl ToTokens for BuildPlan<'_> {
                     vid,
                     kind,
                 } => {
-                    let edge_name = format_ident!("{edge_name}");
+                    let edge_name = format_ident!("{edge_name}_neighbors");
                     let type_name = type_name.as_ref();
                     let eid = EidToken(*eid);
                     let vid = VidToken(*vid);
@@ -206,34 +212,63 @@ impl ToTokens for BuildPlan<'_> {
                     ));
 
                     match kind {
-                        trustfall_core::interpreter::query_plan::ExpandKind::Required => {
+                        ExpandKind::Required => {
                             tokens.extend(quote!(
                                 let iter = ::trustfall_core::interpreter::executer_components::expand_neighbors_required(neighbor_iter);
                             ))
                         },
-                        trustfall_core::interpreter::query_plan::ExpandKind::Optional => {
+                        ExpandKind::Optional => {
                             tokens.extend(quote!(
                                 let iter = ::trustfall_core::interpreter::executer_components::expand_neighbors_optional(neighbor_iter);
                             ))
                         },
-                        trustfall_core::interpreter::query_plan::ExpandKind::Recursive => {
+                        ExpandKind::Recursive => {
                             tokens.extend(quote!(
                                 let iter = ::trustfall_core::interpreter::executer_components::expand_neighbors_recurse(neighbor_iter);
                             ))
                         },
-                        trustfall_core::interpreter::query_plan::ExpandKind::Fold { plan, tags, post_fold_filters } => {},
+                        ExpandKind::Fold { plan, tags, post_fold_filters } => {
+                            let tags = tags.iter().map(FieldRefToken);
+                            let plan = BuildPlan {
+                                typ,
+                                plan: plan.as_slice(),
+                            };
+
+                            tokens.extend(quote!(
+                                let iter = neighbor_iter.filter_map(move |(mut context, neighbors)| {
+                                    let iter = ::trustfall_core::interpreter::executer_components::neighbors_import_tags(
+                                        neighbors,
+                                        &context,
+                                    );
+
+                                    #plan
+
+                                    // let fold_elements = collect_fold_elements(iter, &max_fold_size)?;
+                                    let fold_elements = iter.collect();
+
+                                    ::trustfall_core::interpreter::executer_components::store_folded(
+                                        &mut context,
+                                        #eid,
+                                        fold_elements,
+                                        &[#(#tags),*],
+                                    );
+
+                                    Some(context)
+                                });
+                            ));
+                        },
                         _ => unimplemented!(),
                     }
                 }
                 QueryPlanItem::ImportTag(field) => {
-                    let field_ref = FieldRefToken(field.clone());
+                    let field_ref = FieldRefToken(field);
                     tokens.extend(quote!(
                         let field_ref = #field_ref;
                         let iter = ::trustfall_core::interpreter::executer_components::import_tag(iter, field_ref);
                     ));
                 }
                 QueryPlanItem::PopIntoImport(field) =>{
-                    let field_ref = FieldRefToken(field.clone());
+                    let field_ref = FieldRefToken(field);
                     tokens.extend(quote!(
                         let field_ref = #field_ref;
                         let iter = ::trustfall_core::interpreter::executer_components::pop_into_import(iter, field_ref);
@@ -287,7 +322,51 @@ impl ToTokens for BuildPlan<'_> {
                     fold_specific_outputs,
                     folded_keys,
                     plan,
-                } => {}
+                } => {
+                    let plan = BuildPlan {
+                        typ,
+                        plan: plan.as_slice(),
+                    };
+                    let eid = EidToken(*eid);
+                    let vid = VidToken(*vid);
+                    let output_names = output_names.iter().map(|s| s.as_ref());
+                    let folded_keys_eids = folded_keys.iter().map(|s| EidToken(s.0));
+                    let folded_keys_names = folded_keys.iter().map(|s| s.1.as_ref());
+                    tokens.extend(quote!(
+                        let output_names = [#(::std::sync::Arc::from(#output_names)),*];
+
+                        let folded_keys = [#((
+                            #folded_keys_eids,
+                            ::std::sync::Arc::from(#folded_keys_names),
+                        )),*];
+                        let iter = iter.map(move |mut ctx| {
+                            let extract = ::trustfall_core::interpreter::executer_components::extract_folded_context(
+                                &mut ctx,
+                                #eid,
+                                #vid,
+                                &Default::default(),
+                                &output_names,
+                                &folded_keys,
+                            );
+
+                            if let Some((folded_values, fold_elements)) = extract {
+                                let iter = fold_elements.into_iter();
+
+                                #plan
+
+                                ::trustfall_core::interpreter::executer_components::store_folded_values(
+                                    iter,
+                                    &mut ctx,
+                                    folded_values,
+                                    &output_names,
+                                    #eid,
+                                );
+                            };
+
+                            ctx
+                        });
+                    ));
+                }
                 QueryPlanItem::RecursePostProcess => {
                     tokens.extend(quote!(
                         let iter = ::trustfall_core::interpreter::executer_components::post_process_recursive_expansion(iter);
@@ -319,9 +398,9 @@ impl ToTokens for EidToken {
     }
 }
 
-struct FieldRefToken(FieldRef);
+struct FieldRefToken<'a>(&'a FieldRef);
 
-impl ToTokens for FieldRefToken {
+impl ToTokens for FieldRefToken<'_> {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         match &self.0 {
             FieldRef::ContextField(c) => {
