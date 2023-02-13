@@ -18,6 +18,7 @@ use crate::{
 
 use super::{
     error::QueryArgumentsError,
+    executer_components,
     query_plan::{query_plan, CoerceKind, ExpandKind, QueryPlan, QueryPlanItem, SimpleArgument},
     Adapter, DataContext, InterpretedQuery,
 };
@@ -57,21 +58,7 @@ where
     };
 
     let iter = build_plan(adapter, &query, plan.plan, iter);
-
-    let iter = Box::new(iter.map(move |mut context| {
-        let mut output: BTreeMap<Arc<str>, FieldValue> = plan
-            .outputs
-            .iter()
-            .cloned()
-            .zip(context.values.drain(..))
-            .collect();
-
-        for ((_, output_name), output_value) in context.folded_values {
-            output.insert(output_name, output_value.into());
-        }
-
-        output
-    }));
+    let iter = Box::new(executer_components::collect_outputs(iter, plan.outputs));
 
     Ok(iter)
 }
@@ -106,50 +93,19 @@ where
         // misc steps
         QueryPlanItem::Argument(name) => {
             let right_value = query.arguments[name.as_ref()].to_owned();
-            Box::new(iterator.map(move |mut ctx| {
-                // TODO: implement more efficient filtering with:
-                //       - no clone of runtime parameter values
-                //       - omit the "tag from missing optional" check if the filter argument isn't
-                //         a tag, or if it's a tag that isn't from an optional scope relative to
-                //         the current scope
-                //       - type awareness: we know the type of the field being filtered,
-                //         and we probably know (or can infer) the type of the filtering argument(s)
-                //       - precomputation to improve efficiency: build regexes once,
-                //         turn "in_collection" filter arguments into sets if possible, etc.
-                ctx.values.push(right_value.to_owned());
-                ctx
-            }))
+            Box::new(executer_components::push_value(iterator, right_value))
         }
-        QueryPlanItem::ImportTag(field_ref) => Box::new(iterator.map(move |mut context| {
-            let value = context.imported_tags[&field_ref].clone();
-            context.values.push(value);
-
-            context
-        })),
-        QueryPlanItem::Record(vid) => Box::new(iterator.map(move |mut context| {
-            context.record_token(vid);
-            context
-        })),
-        QueryPlanItem::Activate(vid) => Box::new(iterator.map(move |x| x.activate_token(&vid))),
-        QueryPlanItem::Unsuspend => Box::new(iterator.map(move |x| x.unsuspend())),
-        QueryPlanItem::SuspendNone => Box::new(iterator.map(move |mut context| {
-            if context.current_token.is_none() {
-                // Mark that this token starts off with a None current_token value,
-                // so the later unsuspend() call should restore it to such a state later.
-                context.suspended_tokens.push(None);
-            }
-            context
-        })),
-        QueryPlanItem::Suspend => Box::new(iterator.map(move |context| context.ensure_suspended())),
-        QueryPlanItem::PopIntoImport(field) => Box::new(iterator.map(move |mut ctx| {
-            ctx.imported_tags.insert(
-                field.clone(),
-                ctx.values
-                    .pop()
-                    .expect("fold-specific field computed and pushed onto the stack"),
-            );
-            ctx
-        })),
+        QueryPlanItem::ImportTag(field_ref) => {
+            Box::new(executer_components::import_tag(iterator, field_ref))
+        }
+        QueryPlanItem::Record(vid) => Box::new(executer_components::record(iterator, vid)),
+        QueryPlanItem::Activate(vid) => Box::new(executer_components::activate(iterator, vid)),
+        QueryPlanItem::Unsuspend => Box::new(executer_components::unsuspend(iterator)),
+        QueryPlanItem::SuspendNone => Box::new(executer_components::suspend_none(iterator)),
+        QueryPlanItem::Suspend => Box::new(executer_components::suspend(iterator)),
+        QueryPlanItem::PopIntoImport(field) => {
+            Box::new(executer_components::pop_into_import(iterator, field))
+        }
         QueryPlanItem::Filter(filter) => apply_filter(query, filter, iterator),
 
         // property
@@ -158,12 +114,9 @@ where
             vid,
             field_name,
         } => {
-            let a = adapter;
-            let iter = a.project_property(iterator, type_name, field_name, query.clone(), vid);
-            Box::new(iter.map(|(mut context, value)| {
-                context.values.push(value);
-                context
-            }))
+            let iter =
+                adapter.project_property(iterator, type_name, field_name, query.clone(), vid);
+            Box::new(executer_components::save_property_value(iter))
         }
 
         // type filter
@@ -176,16 +129,8 @@ where
             let coercion_iter =
                 adapter.can_coerce_to_type(iterator, coerced_from, coerce_to, query.clone(), vid);
             match kind {
-                CoerceKind::Filter => Box::new(
-                    coercion_iter.filter_map(|(ctx, can_coerce)| can_coerce.then_some(ctx)),
-                ),
-                CoerceKind::Suspend => Box::new(coercion_iter.map(|(ctx, can_coerce)| {
-                    if can_coerce {
-                        ctx
-                    } else {
-                        ctx.ensure_suspended()
-                    }
-                })),
+                CoerceKind::Filter => Box::new(executer_components::coerce_filter(coercion_iter)),
+                CoerceKind::Suspend => Box::new(executer_components::coerce_suspend(coercion_iter)),
             }
         }
 
@@ -211,14 +156,14 @@ where
         }
 
         // recursion
-        QueryPlanItem::RecursePostProcess => post_process_recursive_expansion(iterator),
+        QueryPlanItem::RecursePostProcess => Box::new(
+            executer_components::post_process_recursive_expansion(iterator),
+        ),
 
         // fold
-        QueryPlanItem::FoldCount(fold_eid) => Box::new(iterator.map(move |mut ctx| {
-            let value = ctx.folded_contexts[&fold_eid].len();
-            ctx.values.push(FieldValue::Uint64(value as u64));
-            ctx
-        })),
+        QueryPlanItem::FoldCount(fold_eid) => {
+            Box::new(executer_components::fold_count(iterator, fold_eid))
+        }
         QueryPlanItem::FoldOutputs {
             eid,
             vid,
@@ -323,21 +268,16 @@ where
     DataToken: Clone + Debug + 'query,
 {
     match kind {
-        ExpandKind::Required => Box::new(iter.flat_map(move |(context, neighbor_iterator)| {
-            EdgeExpander::new(context, neighbor_iterator, false)
-        })),
-        ExpandKind::Optional => Box::new(iter.flat_map(move |(context, neighbor_iterator)| {
-            EdgeExpander::new(context, neighbor_iterator, true)
-        })),
-        ExpandKind::Recursive => Box::new(iter.flat_map(move |(context, neighbor_iterator)| {
-            RecursiveEdgeExpander::new(context, neighbor_iterator)
-        })),
+        ExpandKind::Required => Box::new(executer_components::expand_neighbors_required(iter)),
+        ExpandKind::Optional => Box::new(executer_components::expand_neighbors_optional(iter)),
+        ExpandKind::Recursive => Box::new(executer_components::expand_neighbors_recurse(iter)),
         ExpandKind::Fold {
             plan,
             tags,
             post_fold_filters,
         } => {
-            let max_fold_size = get_max_fold_count_limit(query, &post_fold_filters);
+            let max_fold_size =
+                executer_components::get_max_fold_count_limit(query, &post_fold_filters);
             let query = query.clone();
             let folded_iterator = iter.filter_map(move |(mut context, neighbors)| {
                 let imported_tags = context.imported_tags.clone();
@@ -368,87 +308,13 @@ where
         }
     }
 }
-/// If this IRFold has a filter on the folded element count, and that filter imposes
-/// a max size that can be statically determined, return that max size so it can
-/// be used for further optimizations. Otherwise, return None.
-fn get_max_fold_count_limit(
-    query: &InterpretedQuery,
-    post_fold_filters: &[Operation<FoldSpecificFieldKind, SimpleArgument>],
-) -> Option<usize> {
-    let mut result: Option<usize> = None;
-
-    for post_fold_filter in post_fold_filters {
-        let next_limit = match post_fold_filter {
-            Operation::Equals(FoldSpecificFieldKind::Count, SimpleArgument::Variable(var_ref))
-            | Operation::LessThanOrEqual(
-                FoldSpecificFieldKind::Count,
-                SimpleArgument::Variable(var_ref),
-            ) => {
-                let variable_value = query.arguments[var_ref.as_ref()].as_usize().unwrap();
-                Some(variable_value)
-            }
-            Operation::LessThan(
-                FoldSpecificFieldKind::Count,
-                SimpleArgument::Variable(var_ref),
-            ) => {
-                let variable_value = query.arguments[var_ref.as_ref()].as_usize().unwrap();
-                // saturating_sub() here is a safeguard against underflow: in principle,
-                // we shouldn't see a comparison for "< 0", but if we do regardless, we'd prefer to
-                // saturate to 0 rather than wrapping around. This check is an optimization and
-                // is allowed to be more conservative than strictly necessary.
-                // The later full application of filters ensures correctness.
-                Some(variable_value.saturating_sub(1))
-            }
-            Operation::OneOf(FoldSpecificFieldKind::Count, SimpleArgument::Variable(var_ref)) => {
-                match &query.arguments[var_ref.as_ref()] {
-                    FieldValue::List(v) => v.iter().map(|x| x.as_usize().unwrap()).max(),
-                    _ => unreachable!(),
-                }
-            }
-            _ => None,
-        };
-
-        match (result, next_limit) {
-            (None, _) => result = next_limit,
-            (Some(l), Some(r)) if l > r => result = next_limit,
-            _ => {}
-        }
-    }
-
-    result
-}
 
 fn collect_fold_elements<'query, DataToken: Clone + Debug + 'query>(
-    mut iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
+    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
     max_fold_count_limit: &Option<usize>,
 ) -> Option<Vec<DataContext<DataToken>>> {
     if let Some(max_fold_count_limit) = max_fold_count_limit {
-        // If this fold has more than `max_fold_count_limit` elements,
-        // it will get filtered out by a post-fold filter.
-        // Pulling elements from `iterator` causes computations and data fetches to happen,
-        // and as an optimization we'd like to stop pulling elements as soon as possible.
-        // If we are able to pull more than `max_fold_count_limit + 1` elements,
-        // we know that this fold is going to get filtered out, so we might as well
-        // stop materializing its elements early.
-        let mut fold_elements = Vec::with_capacity(*max_fold_count_limit);
-
-        let mut stopped_early = false;
-        for _ in 0..*max_fold_count_limit {
-            if let Some(element) = iterator.next() {
-                fold_elements.push(element);
-            } else {
-                stopped_early = true;
-                break;
-            }
-        }
-
-        if !stopped_early && iterator.next().is_some() {
-            // There are more elements than the max size allowed by the filters on this fold.
-            // It's going to get filtered out anyway, so we can avoid materializing the rest.
-            return None;
-        }
-
-        Some(fold_elements)
+        executer_components::collect_fold_elements(iterator, *max_fold_count_limit)
     } else {
         // We weren't able to find any early-termination condition for materializing the fold,
         // so materialize the whole thing and return it.
@@ -590,153 +456,6 @@ fn apply_filter<'query, DataToken: Clone + Debug + 'query>(
             }
         },
     }
-}
-struct EdgeExpander<'query, DataToken: Clone + Debug + 'query> {
-    context: DataContext<DataToken>,
-    neighbor_tokens: Option<Box<dyn Iterator<Item = DataToken> + 'query>>,
-    is_optional_edge: bool,
-    has_neighbors: bool,
-}
-
-impl<'query, DataToken: Clone + Debug + 'query> EdgeExpander<'query, DataToken> {
-    pub fn new(
-        context: DataContext<DataToken>,
-        neighbor_tokens: Box<dyn Iterator<Item = DataToken> + 'query>,
-        is_optional_edge: bool,
-    ) -> EdgeExpander<'query, DataToken> {
-        EdgeExpander {
-            context,
-            neighbor_tokens: Some(neighbor_tokens),
-            is_optional_edge,
-            has_neighbors: false,
-        }
-    }
-}
-
-impl<'query, DataToken: Clone + Debug + 'query> Iterator for EdgeExpander<'query, DataToken> {
-    type Item = DataContext<DataToken>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let neighbor_tokens = self.neighbor_tokens.as_mut()?;
-
-        let neighbor = neighbor_tokens.next();
-        if neighbor.is_some() {
-            self.has_neighbors = true;
-            return Some(self.context.split_and_move_to_token(neighbor));
-        } else {
-            self.neighbor_tokens = None;
-        }
-
-        if self.context.current_token.is_none() {
-            // If there's no current token, there couldn't possibly be neighbors.
-            // If this assertion trips, the adapter's project_neighbors() implementation illegally
-            // returned neighbors for a non-existent vertex.
-            assert!(!self.has_neighbors);
-            Some(self.context.split_and_move_to_token(None))
-        } else if self.is_optional_edge && !self.has_neighbors {
-            // The edge is optional and we havent returned anything, so
-            // return the empty context
-            Some(self.context.split_and_move_to_token(None))
-        } else {
-            None
-        }
-    }
-}
-
-struct RecursiveEdgeExpander<'query, DataToken: Clone + Debug + 'query> {
-    context: Option<DataContext<DataToken>>,
-    neighbor_base: Option<DataContext<DataToken>>,
-    neighbor_tokens: Option<Box<dyn Iterator<Item = DataToken> + 'query>>,
-}
-
-impl<'query, DataToken: Clone + Debug + 'query> RecursiveEdgeExpander<'query, DataToken> {
-    pub fn new(
-        context: DataContext<DataToken>,
-        neighbor_tokens: Box<dyn Iterator<Item = DataToken> + 'query>,
-    ) -> RecursiveEdgeExpander<'query, DataToken> {
-        RecursiveEdgeExpander {
-            context: Some(context),
-            neighbor_base: None,
-            neighbor_tokens: Some(neighbor_tokens),
-        }
-    }
-}
-
-impl<'query, DataToken: Clone + Debug + 'query> Iterator
-    for RecursiveEdgeExpander<'query, DataToken>
-{
-    type Item = DataContext<DataToken>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(neighbor_tokens) = self.neighbor_tokens.as_mut() {
-            let neighbor = neighbor_tokens.next();
-
-            if let Some(token) = neighbor {
-                if let Some(context) = self.context.take() {
-                    // Prep a neighbor base context for future use, since we're moving
-                    // the "self" context out.
-                    self.neighbor_base = Some(context.split_and_move_to_token(None));
-
-                    // Attach the "self" context as a piggyback rider on the neighbor.
-                    let mut neighbor_context = context.split_and_move_to_token(Some(token));
-                    neighbor_context
-                        .piggyback
-                        .get_or_insert_with(Default::default)
-                        .push(context.ensure_suspended());
-                    return Some(neighbor_context);
-                } else {
-                    // The "self" token has already been moved out, so use the neighbor base context
-                    // as the starting point for constructing a new context.
-                    return Some(
-                        self.neighbor_base
-                            .as_ref()
-                            .unwrap()
-                            .split_and_move_to_token(Some(token)),
-                    );
-                }
-            } else {
-                self.neighbor_tokens = None;
-            }
-        }
-
-        self.context.take()
-    }
-}
-
-fn unpack_piggyback<DataToken: Debug + Clone>(
-    context: DataContext<DataToken>,
-) -> Vec<DataContext<DataToken>> {
-    let mut result = Default::default();
-
-    unpack_piggyback_inner(&mut result, context);
-
-    result
-}
-
-fn unpack_piggyback_inner<DataToken: Debug + Clone>(
-    output: &mut Vec<DataContext<DataToken>>,
-    mut context: DataContext<DataToken>,
-) {
-    if let Some(piggyback) = context.piggyback.take() {
-        for ctx in piggyback {
-            unpack_piggyback_inner(output, ctx);
-        }
-    }
-
-    output.push(context);
-}
-
-fn post_process_recursive_expansion<'query, DataToken: Clone + Debug + 'query>(
-    iterator: Box<dyn Iterator<Item = DataContext<DataToken>> + 'query>,
-) -> Box<dyn Iterator<Item = DataContext<DataToken>> + 'query> {
-    Box::new(
-        iterator
-            .flat_map(|context| unpack_piggyback(context))
-            .map(|context| {
-                assert!(context.piggyback.is_none());
-                context.ensure_unsuspended()
-            }),
-    )
 }
 
 #[cfg(test)]

@@ -1,16 +1,8 @@
 use std::collections::{btree_map, hash_map, BTreeMap, HashMap};
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-
-use crate::{
-    frontend::error::FrontendError,
-    graphql_query::{error::ParseError, query::Query},
-    interpreter::trace::Trace,
-    ir::{FieldValue, IRQuery},
-};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DisplayVec<T>(pub Vec<T>);
@@ -151,52 +143,68 @@ impl<K: Ord, V> BTreeMapTryInsertExt<K, V> for BTreeMap<K, V> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TestGraphQLQuery {
-    pub(crate) schema_name: String,
+#[cfg(test)]
+mod test_utils {
+    use std::collections::BTreeMap;
+    use std::fmt::Debug;
+    use std::sync::Arc;
 
-    pub(crate) query: String,
+    use serde::{Deserialize, Serialize};
 
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) arguments: BTreeMap<String, FieldValue>,
+    use crate::{
+        frontend::error::FrontendError,
+        graphql_query::{error::ParseError, query::Query},
+        interpreter::trace::Trace,
+        ir::{FieldValue, IRQuery},
+    };
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub(crate) struct TestGraphQLQuery {
+        pub(crate) schema_name: String,
+
+        pub(crate) query: String,
+
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        pub(crate) arguments: BTreeMap<String, FieldValue>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub(crate) struct TestParsedGraphQLQuery {
+        pub(crate) schema_name: String,
+
+        pub(crate) query: Query,
+
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        pub(crate) arguments: BTreeMap<String, FieldValue>,
+    }
+
+    pub(crate) type TestParsedGraphQLQueryResult = Result<TestParsedGraphQLQuery, ParseError>;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub(crate) struct TestIRQuery {
+        pub(crate) schema_name: String,
+
+        pub(crate) ir_query: IRQuery,
+
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        pub(crate) arguments: BTreeMap<String, FieldValue>,
+    }
+
+    pub(crate) type TestIRQueryResult = Result<TestIRQuery, FrontendError>;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(bound = "DataToken: Serialize, for<'de2> DataToken: Deserialize<'de2>")]
+    pub(crate) struct TestInterpreterOutputTrace<DataToken>
+    where
+        DataToken: Clone + Debug + PartialEq + Eq + Serialize,
+        for<'de2> DataToken: Deserialize<'de2>,
+    {
+        pub(crate) schema_name: String,
+
+        pub(crate) trace: Trace<DataToken>,
+
+        pub(crate) results: Vec<BTreeMap<Arc<str>, FieldValue>>,
+    }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TestParsedGraphQLQuery {
-    pub(crate) schema_name: String,
-
-    pub(crate) query: Query,
-
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) arguments: BTreeMap<String, FieldValue>,
-}
-
-#[allow(dead_code)]
-pub(crate) type TestParsedGraphQLQueryResult = Result<TestParsedGraphQLQuery, ParseError>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TestIRQuery {
-    pub(crate) schema_name: String,
-
-    pub(crate) ir_query: IRQuery,
-
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) arguments: BTreeMap<String, FieldValue>,
-}
-
-#[allow(dead_code)]
-pub(crate) type TestIRQueryResult = Result<TestIRQuery, FrontendError>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound = "DataToken: Serialize, for<'de2> DataToken: Deserialize<'de2>")]
-pub(crate) struct TestInterpreterOutputTrace<DataToken>
-where
-    DataToken: Clone + Debug + PartialEq + Eq + Serialize,
-    for<'de2> DataToken: Deserialize<'de2>,
-{
-    pub(crate) schema_name: String,
-
-    pub(crate) trace: Trace<DataToken>,
-
-    pub(crate) results: Vec<BTreeMap<Arc<str>, FieldValue>>,
-}
+#[cfg(test)]
+pub(crate) use test_utils::*;

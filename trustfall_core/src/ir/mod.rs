@@ -37,6 +37,10 @@ impl Vid {
     pub fn new(id: NonZeroUsize) -> Vid {
         Vid(id)
     }
+
+    pub fn get(self) -> NonZeroUsize {
+        self.0
+    }
 }
 
 impl dbg_pls::DebugPls for Vid {
@@ -53,6 +57,10 @@ pub struct Eid(pub(crate) NonZeroUsize);
 impl Eid {
     pub fn new(id: NonZeroUsize) -> Eid {
         Eid(id)
+    }
+
+    pub fn get(self) -> NonZeroUsize {
+        self.0
     }
 }
 

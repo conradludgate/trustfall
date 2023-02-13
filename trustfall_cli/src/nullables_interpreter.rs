@@ -2,16 +2,16 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
+use trustfall_core::{
     interpreter::{Adapter, DataContext, InterpretedQuery},
     ir::{EdgeParameters, Eid, FieldValue, Vid},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct NullablesToken;
+pub struct NullablesToken;
 
 #[derive(Debug, Clone)]
-pub(crate) struct NullablesAdapter;
+pub struct NullablesAdapter;
 
 #[allow(unused_variables)]
 impl Adapter<'static> for NullablesAdapter {

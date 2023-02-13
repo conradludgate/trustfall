@@ -2,55 +2,37 @@
 #![forbid(unused_lifetimes)]
 #![allow(clippy::result_large_err)] // TODO: clean this up repo-wide
 
-#[macro_use]
-extern crate maplit;
-
-#[macro_use]
-extern crate lazy_static;
-
-mod filesystem_interpreter;
-mod frontend;
-mod graphql_query;
-mod interpreter;
-mod ir;
-mod nullables_interpreter;
-mod numbers_interpreter;
-mod schema;
-mod util;
-
 use std::{
     cell::RefCell, collections::BTreeMap, convert::TryInto, env, fmt::Debug, fs, rc::Rc, sync::Arc,
 };
 
-use async_graphql_parser::{parse_query, parse_schema};
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use trustfall_cli::filesystem_interpreter::{FilesystemInterpreter, FilesystemToken};
+use trustfall_cli::nullables_interpreter::NullablesAdapter;
+use trustfall_cli::numbers_interpreter::{NumbersAdapter, NumbersToken};
+use trustfall_cli::{
+    TestGraphQLQuery, TestIRQuery, TestIRQueryResult, TestInterpreterOutputTrace,
+    TestParsedGraphQLQueryResult,
+};
+use trustfall_core::interpreter::trace::TraceOpContent;
+use trustfall_core::ir::FieldValue;
 use trustfall_core::{interpreter::error::QueryArgumentsError, schema::error::InvalidSchemaError};
 
-use crate::{
-    filesystem_interpreter::{FilesystemInterpreter, FilesystemToken},
-    graphql_query::error::ParseError,
-    graphql_query::query::parse_document,
+use trustfall_core::{
     interpreter::{
         execution,
-        trace::{tap_results, AdapterTap, Trace},
+        trace::{AdapterTap, Trace},
         Adapter,
     },
-    nullables_interpreter::NullablesAdapter,
-    numbers_interpreter::{NumbersAdapter, NumbersToken},
     schema::Schema,
-    util::{
-        TestGraphQLQuery, TestIRQuery, TestIRQueryResult, TestInterpreterOutputTrace,
-        TestParsedGraphQLQuery, TestParsedGraphQLQueryResult,
-    },
 };
 
-fn get_schema_by_name(schema_name: &str) -> Schema {
-    let schema_text =
-        fs::read_to_string(format!("src/resources/schemas/{schema_name}.graphql",)).unwrap();
-    let schema_document = parse_schema(schema_text).unwrap();
-    Schema::new(schema_document).unwrap()
-}
+// fn get_schema_by_name(schema_name: &str) -> Schema {
+//     let schema_text =
+//         fs::read_to_string(format!("src/resources/schemas/{schema_name}.graphql",)).unwrap();
+//     let schema_document = parse_schema(schema_text).unwrap();
+//     Schema::new(schema_document).unwrap()
+// }
 
 fn serialize_to_ron<S: Serialize>(s: &S) -> String {
     let mut buf = Vec::new();
@@ -63,55 +45,71 @@ fn serialize_to_ron<S: Serialize>(s: &S) -> String {
     String::from_utf8(buf).unwrap()
 }
 
-fn parse(path: &str) {
-    let input_data = fs::read_to_string(path).unwrap();
-    let test_query: TestGraphQLQuery = ron::from_str(&input_data).unwrap();
+// fn parse(path: &str) {
+//     let input_data = fs::read_to_string(path).unwrap();
+//     let test_query: TestGraphQLQuery = ron::from_str(&input_data).unwrap();
 
-    let arguments = test_query.arguments;
-    let result: TestParsedGraphQLQueryResult = parse_query(test_query.query)
-        .map_err(ParseError::from)
-        .and_then(|doc| parse_document(&doc))
-        .map(move |query| TestParsedGraphQLQuery {
-            schema_name: test_query.schema_name,
-            query,
-            arguments,
-        });
+//     let arguments = test_query.arguments;
+//     let result: TestParsedGraphQLQueryResult = parse_query(test_query.query)
+//         .map_err(ParseError::from)
+//         .and_then(|doc| parse_document(&doc))
+//         .map(move |query| TestParsedGraphQLQuery {
+//             schema_name: test_query.schema_name,
+//             query,
+//             arguments,
+//         });
 
-    println!("{}", serialize_to_ron(&result));
-}
+//     println!("{}", serialize_to_ron(&result));
+// }
 
-fn frontend(path: &str) {
-    let input_data = fs::read_to_string(path).unwrap();
-    let test_query_result: TestParsedGraphQLQueryResult = ron::from_str(&input_data).unwrap();
-    let test_query = test_query_result.unwrap();
+// fn frontend(path: &str) {
+//     let input_data = fs::read_to_string(path).unwrap();
+//     let test_query_result: TestParsedGraphQLQueryResult = ron::from_str(&input_data).unwrap();
+//     let test_query = test_query_result.unwrap();
 
-    let schema = get_schema_by_name(test_query.schema_name.as_str());
+//     let schema = get_schema_by_name(test_query.schema_name.as_str());
 
-    let arguments = test_query.arguments;
-    let ir_query_result = frontend::make_ir_for_query(&schema, &test_query.query);
-    let result: TestIRQueryResult = ir_query_result.map(move |ir_query| TestIRQuery {
-        schema_name: test_query.schema_name,
-        ir_query,
-        arguments,
-    });
+//     let arguments = test_query.arguments;
+//     let ir_query_result = frontend::make_ir_for_query(&schema, &test_query.query);
+//     let result: TestIRQueryResult = ir_query_result.map(move |ir_query| TestIRQuery {
+//         schema_name: test_query.schema_name,
+//         ir_query,
+//         arguments,
+//     });
 
-    println!("{}", serialize_to_ron(&result));
-}
+//     println!("{}", serialize_to_ron(&result));
+// }
 
-fn check_fuzzed(path: &str, schema_name: &str) {
-    let schema = get_schema_by_name(schema_name);
+// fn check_fuzzed(path: &str, schema_name: &str) {
+//     let schema = get_schema_by_name(schema_name);
 
-    let query_string = fs::read_to_string(path).unwrap();
+//     let query_string = fs::read_to_string(path).unwrap();
 
-    let query = match frontend::parse(&schema, query_string.as_str()) {
-        Ok(query) => query,
-        Err(e) => {
-            println!("{}", serialize_to_ron(&e));
-            return;
-        }
-    };
+//     let query = match frontend::parse(&schema, query_string.as_str()) {
+//         Ok(query) => query,
+//         Err(e) => {
+//             println!("{}", serialize_to_ron(&e));
+//             return;
+//         }
+//     };
 
-    println!("{}", serialize_to_ron(&query));
+//     println!("{}", serialize_to_ron(&query));
+// }
+
+pub(crate) fn tap_results<'token, DataToken>(
+    trace: &mut Trace<DataToken>,
+    result_iter: impl Iterator<Item = BTreeMap<Arc<str>, FieldValue>> + 'token,
+) -> Vec<BTreeMap<Arc<str>, FieldValue>>
+where
+    DataToken: Clone + Debug + PartialEq + Eq + Serialize + 'token,
+    for<'de2> DataToken: Deserialize<'de2>,
+{
+    result_iter
+        .map(|result| {
+            trace.record(TraceOpContent::ProduceQueryResult(result.clone()), None);
+            result
+        })
+        .collect()
 }
 
 fn trace_with_adapter<'a, AdapterT>(adapter: AdapterT, test_query: TestIRQuery)
@@ -138,9 +136,9 @@ where
     let execution_result = execution::interpret_ir(adapter_tap.clone(), query, arguments);
     match execution_result {
         Ok(results_iter) => {
-            let results = tap_results(adapter_tap.clone(), results_iter).collect_vec();
+            let mut trace = adapter_tap.finish();
+            let results = tap_results(&mut trace, results_iter);
 
-            let trace = adapter_tap.finish();
             let data = TestInterpreterOutputTrace {
                 schema_name: test_query.schema_name,
                 trace,
@@ -268,20 +266,20 @@ fn main() {
 
     match reversed_args.pop() {
         None => panic!("No command given"),
-        Some("parse") => match reversed_args.pop() {
-            None => panic!("No filename provided"),
-            Some(path) => {
-                assert!(reversed_args.is_empty());
-                parse(path)
-            }
-        },
-        Some("frontend") => match reversed_args.pop() {
-            None => panic!("No filename provided"),
-            Some(path) => {
-                assert!(reversed_args.is_empty());
-                frontend(path)
-            }
-        },
+        // Some("parse") => match reversed_args.pop() {
+        //     None => panic!("No filename provided"),
+        //     Some(path) => {
+        //         assert!(reversed_args.is_empty());
+        //         parse(path)
+        //     }
+        // },
+        // Some("frontend") => match reversed_args.pop() {
+        //     None => panic!("No filename provided"),
+        //     Some(path) => {
+        //         assert!(reversed_args.is_empty());
+        //         frontend(path)
+        //     }
+        // },
         Some("trace") => match reversed_args.pop() {
             None => panic!("No filename provided"),
             Some(path) => {
@@ -312,15 +310,15 @@ fn main() {
                 corpus_graphql(path, schema_name)
             }
         },
-        Some("check_fuzzed") => match reversed_args.pop() {
-            None => panic!("No filename provided"),
-            Some(path) => {
-                let schema_name = reversed_args.pop().expect("schema name");
+        // Some("check_fuzzed") => match reversed_args.pop() {
+        //     None => panic!("No filename provided"),
+        //     Some(path) => {
+        //         let schema_name = reversed_args.pop().expect("schema name");
 
-                assert!(reversed_args.is_empty());
-                check_fuzzed(path, schema_name)
-            }
-        },
+        //         assert!(reversed_args.is_empty());
+        //         check_fuzzed(path, schema_name)
+        //     }
+        // },
         Some(cmd) => panic!("Unrecognized command given: {cmd}"),
     }
 }

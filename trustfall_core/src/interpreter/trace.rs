@@ -36,7 +36,6 @@ where
     DataToken: Clone + Debug + PartialEq + Eq + Serialize,
     for<'de2> DataToken: Deserialize<'de2>,
 {
-    #[allow(dead_code)]
     pub fn new(ir_query: IRQuery, arguments: BTreeMap<String, FieldValue>) -> Self {
         Self {
             ops: Default::default(),
@@ -207,25 +206,6 @@ where
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn tap_results<'token, DataToken, AdapterT>(
-    adapter_tap: Rc<AdapterTap<'token, DataToken, AdapterT>>,
-    result_iter: impl Iterator<Item = BTreeMap<Arc<str>, FieldValue>> + 'token,
-) -> impl Iterator<Item = BTreeMap<Arc<str>, FieldValue>> + 'token
-where
-    AdapterT: Adapter<'token, DataToken = DataToken> + 'token,
-    DataToken: Clone + Debug + PartialEq + Eq + Serialize + 'token,
-    for<'de2> DataToken: Deserialize<'de2>,
-{
-    result_iter.map(move |result| {
-        adapter_tap
-            .tracer
-            .borrow_mut()
-            .record(TraceOpContent::ProduceQueryResult(result.clone()), None);
-
-        result
-    })
-}
 
 impl<'token, DataToken, AdapterT> Adapter<'token> for AdapterTap<'token, DataToken, AdapterT>
 where

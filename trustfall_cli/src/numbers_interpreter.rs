@@ -1,16 +1,15 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::{
+use trustfall_core::{
     interpreter::{Adapter, DataContext, InterpretedQuery},
     ir::{EdgeParameters, Eid, FieldValue, Vid},
     project_property,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum NumbersToken {
+pub enum NumbersToken {
     Neither(NeitherNumber), // zero and one
     Prime(PrimeNumber),
     Composite(CompositeNumber),
@@ -55,13 +54,13 @@ trait Number {
                     'a' | 'e' | 'i' | 'o' | 'u' => Some(x.to_string()),
                     _ => None,
                 })
-                .collect_vec()
+                .collect()
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct NeitherNumber(i64);
+pub struct NeitherNumber(i64);
 
 impl Number for NeitherNumber {
     fn typename(&self) -> &'static str {
@@ -74,7 +73,7 @@ impl Number for NeitherNumber {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PrimeNumber(i64);
+pub struct PrimeNumber(i64);
 
 impl Number for PrimeNumber {
     fn typename(&self) -> &'static str {
@@ -87,7 +86,7 @@ impl Number for PrimeNumber {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CompositeNumber(i64, BTreeSet<i64>);
+pub struct CompositeNumber(i64, BTreeSet<i64>);
 
 impl Number for CompositeNumber {
     fn typename(&self) -> &'static str {
@@ -149,7 +148,7 @@ fn make_number_token(primes: &mut BTreeSet<i64>, num: i64) -> NumbersToken {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct NumbersAdapter;
+pub struct NumbersAdapter;
 
 #[allow(unused_variables)]
 impl Adapter<'static> for NumbersAdapter {
@@ -180,10 +179,7 @@ impl Adapter<'static> for NumbersAdapter {
                     Box::new(std::iter::empty())
                 } else {
                     Box::new(
-                        (min_value..=max_value)
-                            .map(move |n| make_number_token(&mut primes, n))
-                            .collect_vec()
-                            .into_iter(),
+                        (min_value..=max_value).map(move |n| make_number_token(&mut primes, n)),
                     )
                 }
             }
@@ -216,7 +212,7 @@ impl Adapter<'static> for NumbersAdapter {
                         (vowelsInName, token, {
                             match token.vowels_in_name() {
                                 None => FieldValue::Null,
-                                Some(v) => FieldValue::List(v.into_iter().map(FieldValue::String).collect_vec()),
+                                Some(v) => FieldValue::List(v.into_iter().map(FieldValue::String).collect()),
                             }
                         }),
                         (__typename, token, {
@@ -335,7 +331,7 @@ impl Adapter<'static> for NumbersAdapter {
                             factors
                                 .iter()
                                 .map(|n| make_number_token(&mut primes, *n))
-                                .collect_vec()
+                                .collect::<Vec<_>>()
                                 .into_iter(),
                         )
                     }
@@ -361,7 +357,7 @@ impl Adapter<'static> for NumbersAdapter {
                                             None
                                         }
                                     })
-                                    .collect_vec()
+                                    .collect::<Vec<_>>()
                                     .into_iter(),
                             )
                         }

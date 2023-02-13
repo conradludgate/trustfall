@@ -21,6 +21,9 @@ pub mod query_plan;
 pub mod replay;
 pub mod trace;
 
+#[doc(hidden)]
+pub mod executer_components;
+
 #[derive(Debug, Clone)]
 pub struct DataContext<DataToken: Clone + Debug> {
     pub current_token: Option<DataToken>,

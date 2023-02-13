@@ -232,12 +232,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "camino"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88ad0e1e3e88dd237a156ab9f571021b8a158caa0ae44b1968a241efb5144c1e"
-
-[[package]]
 name = "cc"
 version = "1.0.73"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -589,6 +583,7 @@ dependencies = [
  "serde_json",
  "tokio 1.20.1",
  "trustfall_core",
+ "trustfall_macros",
  "yaml-rust",
 ]
 
@@ -3256,12 +3251,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "trustfall-cli"
+version = "0.1.0"
+dependencies = [
+ "maplit",
+ "ron 0.6.6",
+ "serde",
+ "serde_json",
+ "trustfall_core",
+ "trustfall_filetests_macros",
+]
+
+[[package]]
 name = "trustfall_core"
 version = "0.1.1"
 dependencies = [
  "async-graphql-parser",
  "async-graphql-value",
- "camino",
  "chrono",
  "dbg-pls",
  "itertools",
@@ -3285,6 +3291,16 @@ dependencies = [
  "quote",
  "syn",
  "walkdir",
+]
+
+[[package]]
+name = "trustfall_macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+ "trustfall_core",
 ]
 
 [[package]]

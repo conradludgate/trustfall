@@ -2,13 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::interpreter::{Adapter, DataContext, InterpretedQuery};
-use crate::ir::{EdgeParameters, Eid, FieldValue, Vid};
 use std::fs::{self, ReadDir};
 use std::iter;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use trustfall_core::interpreter::{Adapter, DataContext, InterpretedQuery};
+use trustfall_core::ir::{EdgeParameters, Eid, FieldValue, Vid};
 
 #[derive(Debug, Clone)]
 pub struct FilesystemInterpreter {
