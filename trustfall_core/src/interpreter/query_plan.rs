@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_graphql_parser::types::Type;
-use dbg_pls::DebugPls;
+use dbg_pls::{DebugPls, color};
 use itertools::Itertools;
 
 use crate::ir::{
@@ -141,7 +141,7 @@ pub fn query_plan(indexed_query: Arc<IndexedQuery>) -> QueryPlan {
     let component = &ir_query.root_component;
     let root_vid = component.root;
 
-    let mut plan = compute_component(indexed_query.clone(), component);
+    let mut plan = color!(compute_component(indexed_query.clone(), component));
     let outputs = construct_outputs(&ir_query.root_component, &mut plan);
 
     QueryPlan {

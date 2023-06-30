@@ -5,18 +5,13 @@ InputQuery (
         submitted {
             ... on Comment {
                 text @output
-                comment_at: unixTime @output
 
                 parent @recurse(depth: 10) {
                     ... on Story {
-                        url @filter(op: "regex", value: ["$url_pattern"]) @output
                         title @output
-                        score @output
-                        submitted_at: unixTime @output
 
                         submitter_: byUser {
                             id @output
-                            karma @output
                         }
                     }
                 }

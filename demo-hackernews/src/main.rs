@@ -39,6 +39,7 @@ fn execute_query(path: &str) {
 
     let query = parse(&SCHEMA, input_query.query).unwrap();
 
+    dbg!(&query);
     dbg!(query_plan(query.clone()));
 
     let arguments = input_query.args;

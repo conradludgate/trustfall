@@ -70,12 +70,12 @@ fn execute_query(path: &str) {
     let input_query: InputQuery = ron::from_str(&content).unwrap();
 
     let data = read_feed_data();
-    let adapter = FeedAdapter::new(&data);
+    let adapter = Rc::new(FeedAdapter::new(&data));
 
-    // let query = parse(&SCHEMA, input_query.query).unwrap();
-    // let arguments = input_query.args;
+    let query = parse(&SCHEMA, input_query.query).unwrap();
+    let arguments = input_query.args;
 
-    for data_item in adapter.query() {
+    for data_item in interpret_ir(adapter, query, arguments).unwrap() {
         println!("\n{}", serde_json::to_string_pretty(&data_item).unwrap());
     }
 }
@@ -98,32 +98,29 @@ fn main() {
     let data = read_feed_data();
     let adapter = FeedAdapter::new(&data);
 
-    // let query = parse(&SCHEMA, input_query.query).unwrap();
-    // let arguments = input_query.args;
-
-    for data_item in adapter.query() {
-        println!("\n{}", serde_json::to_string_pretty(&data_item).unwrap());
-    }
-
-    // let args: Vec<String> = env::args().collect();
-    // let mut reversed_args: Vec<_> = args.iter().map(|x| x.as_str()).rev().collect();
-
-    // reversed_args
-    //     .pop()
-    //     .expect("Expected the executable name to be the first argument, but was missing");
-
-    // match reversed_args.pop() {
-    //     None => panic!("No command given"),
-    //     Some("refresh") => refresh_data(),
-    //     Some("query") => match reversed_args.pop() {
-    //         None => panic!("No filename provided"),
-    //         Some(path) => {
-    //             assert!(reversed_args.is_empty());
-    //             execute_query(path)
-    //         }
-    //     },
-    //     Some(cmd) => panic!("Unrecognized command given: {cmd}"),
+    // for data_item in adapter.query() {
+    //     println!("\n{}", serde_json::to_string_pretty(&data_item).unwrap());
     // }
+
+    let args: Vec<String> = env::args().collect();
+    let mut reversed_args: Vec<_> = args.iter().map(|x| x.as_str()).rev().collect();
+
+    reversed_args
+        .pop()
+        .expect("Expected the executable name to be the first argument, but was missing");
+
+    match reversed_args.pop() {
+        None => panic!("No command given"),
+        Some("refresh") => refresh_data(),
+        Some("query") => match reversed_args.pop() {
+            None => panic!("No filename provided"),
+            Some(path) => {
+                assert!(reversed_args.is_empty());
+                execute_query(path)
+            }
+        },
+        Some(cmd) => panic!("Unrecognized command given: {cmd}"),
+    }
 }
 
 compile_query!(
